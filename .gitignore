@@ -1,0 +1,55 @@
+# 데이터 폴더 (저작권 보호)
+data/Mind_small
+*.zip
+*.tsv
+
+# Python 가상환경
+gerl_env/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# PyTorch 모델 파일
+*.pth
+*.pt
+saved_models/
+checkpoints/
+
+# 로그 파일
+*.log
+logs/
+runs/
+tensorboard/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IDE 설정 파일
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS 생성 파일
+.DS_Store
+Thumbs.db
+
+# 임시 파일
+*.tmp
+*.temp
+temp/
+
+# 실험 결과
+experiments/
+results/
+outputs/
+
+# 빌드 및 배포
+build/
+dist/
+*.egg-info/
+
+# 환경 변수
+.env 
