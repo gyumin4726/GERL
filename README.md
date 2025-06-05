@@ -1,7 +1,5 @@
 # GERL: Graph Enhanced Representation Learning for News Recommendation
 
-논문 "Graph Enhanced Representation Learning for News Recommendation"에서 제안된 GERL 모델의 PyTorch 구현입니다.
-
 ## 프로젝트 구조
 
 ```
@@ -104,10 +102,6 @@ data/MIND_small/
     ├── behaviors.tsv
     └── news.tsv
 ```
-
-**⚠️ 주의사항:** 
-- MIND 데이터셋은 저작권이 있으므로 GitHub에 업로드하지 마세요
-- `.gitignore`가 자동으로 data/ 폴더를 제외합니다
 
 ## 사용법
 

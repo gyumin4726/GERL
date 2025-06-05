@@ -6,8 +6,8 @@ class Config:
     max_clicked_news = 50        # 논문: 사용자가 클릭한 뉴스 최대 수
     max_neighbors = 15           # 논문: 이웃 노드 degree (Figure 5b에서 15로 설정)
     
-    # 임베딩 차원 설정
-    word_embed_dim = 256         # 8로 나누어떨어지는 값 (원래 300 -> 256)
+    # 임베딩 차원 설정 
+    word_embed_dim = 256         # 8로 나누어떨어지는 값 (멀티헤드 호환)
     user_embed_dim = 128         # 논문: 사용자 ID 임베딩 차원
     news_embed_dim = 128         # 논문: 뉴스 ID 임베딩 차원
     topic_embed_dim = 128        # 논문: 토픽 임베딩 차원
@@ -21,12 +21,17 @@ class Config:
     learning_rate = 0.001       # Adam 학습률
     dropout = 0.2               # 논문: dropout rate
     num_epochs = 10             # 훈련 에포크 수
+    negative_sampling_ratio = 4 # 논문: λ = 4 (Eq. 5)
     
     # 데이터셋 크기 (실제 데이터 로딩 후 업데이트 필요)
     vocab_size = 50000          # 어휘 크기
     num_users = 50000           # 사용자 수
     num_news = 100000           # 뉴스 수
     num_topics = 20             # 토픽 카테고리 수
+    
+    # GloVe 임베딩 설정 (논문에서 사용)
+    glove_path = "data/glove.6B.200d.txt"  # GloVe 파일 경로 (256에 가까운 차원)
+    use_pretrained_embeddings = True        # 사전 학습된 임베딩 사용 여부
     
     # 기타 설정
     device = 'cuda'             # GPU 사용

@@ -2,6 +2,44 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
+import numpy as np
+
+
+def load_glove_embeddings(glove_path, vocab, embed_dim):
+    """GloVe 임베딩 로드 및 어휘에 맞게 변환"""
+    print(f"Loading GloVe embeddings from {glove_path}...")
+    
+    # GloVe 임베딩 딕셔너리 로드
+    glove_dict = {}
+    
+    try:
+        with open(glove_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                values = line.strip().split()
+                word = values[0]
+                vector = np.array(values[1:], dtype=np.float32)
+                if len(vector) == embed_dim:  # 차원이 맞는 경우만
+                    glove_dict[word] = vector
+    except FileNotFoundError:
+        print(f"Warning: GloVe file not found at {glove_path}. Using random initialization.")
+        return None
+    
+    print(f"Loaded {len(glove_dict)} GloVe vectors")
+    
+    # 어휘에 맞는 임베딩 행렬 생성
+    vocab_size = len(vocab)
+    embedding_matrix = np.random.normal(0, 0.1, (vocab_size, embed_dim))
+    
+    # 어휘의 각 단어에 대해 GloVe 벡터가 있으면 사용
+    found_words = 0
+    for word, idx in vocab.items():
+        if word in glove_dict:
+            embedding_matrix[idx] = glove_dict[word]
+            found_words += 1
+    
+    print(f"Found GloVe vectors for {found_words}/{vocab_size} words ({found_words/vocab_size*100:.1f}%)")
+    
+    return torch.FloatTensor(embedding_matrix)
 
 
 class MultiHeadSelfAttention(nn.Module):
@@ -61,11 +99,19 @@ class NewsTransformer(nn.Module):
     """뉴스 텍스트를 위한 Transformer 모듈"""
     
     def __init__(self, vocab_size, embed_dim, num_heads, num_topics, 
-                 topic_embed_dim, dropout=0.2, attention_hidden_dim=128):
+                 topic_embed_dim, dropout=0.2, attention_hidden_dim=128,
+                 vocab=None, glove_path=None):
         super(NewsTransformer, self).__init__()
         
         # 단어 임베딩 레이어
         self.word_embedding = nn.Embedding(vocab_size, embed_dim, padding_idx=0)
+        
+        # GloVe 임베딩으로 초기화 (논문에서 언급)
+        if vocab is not None and glove_path is not None:
+            glove_embeddings = load_glove_embeddings(glove_path, vocab, embed_dim)
+            if glove_embeddings is not None:
+                self.word_embedding.weight.data.copy_(glove_embeddings)
+                print("Word embeddings initialized with GloVe")
         
         # 토픽 임베딩 레이어
         self.topic_embedding = nn.Embedding(num_topics, topic_embed_dim)

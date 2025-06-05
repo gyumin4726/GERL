@@ -45,24 +45,10 @@ def train_epoch(model, train_loader, optimizer, device, config):
 
 
 def evaluate_epoch(model, dev_loader, device):
-    """평가"""
-    model.eval()
-    total_loss = 0
-    num_batches = 0
-    
-    with torch.no_grad():
-        for batch in tqdm(dev_loader, desc="Evaluating"):
-            # 데이터를 device로 이동
-            for key in batch:
-                batch[key] = batch[key].to(device)
-            
-            # 손실 계산
-            loss = model.compute_loss(batch)
-            total_loss += loss.item()
-            num_batches += 1
-    
-    avg_loss = total_loss / num_batches
-    return avg_loss
+    """평가 (논문에서 사용한 지표들로)"""
+    # 논문의 평가 지표 사용
+    metrics = evaluate_model(model, dev_loader, device)
+    return metrics
 
 
 def main():
@@ -93,7 +79,8 @@ def main():
     print("Creating data loaders...")
     train_loader, dev_loader = create_data_loaders(
         data_dir=args.data_dir, 
-        batch_size=config.batch_size
+        batch_size=config.batch_size,
+        rebuild_graph=False  # 첫 실행시 True로 설정하여 그래프 구축
     )
     
     # 첫 번째 배치에서 실제 데이터 크기 확인
@@ -103,9 +90,21 @@ def main():
         if isinstance(value, torch.Tensor):
             print(f"  {key}: {value.shape}")
     
-    # 모델 생성
+    # 어휘 정보 가져오기
+    train_dataset = train_loader.dataset
+    vocab = train_dataset.vocab
+    
+    # 설정 업데이트 (실제 데이터 크기 반영)
+    config.update_vocab_sizes(
+        vocab_size=len(vocab),
+        num_users=50000,  # 실제 사용자 수로 업데이트 가능
+        num_news=100000,  # 실제 뉴스 수로 업데이트 가능
+        num_topics=20
+    )
+    
+    # 모델 생성 (어휘 정보 전달)
     print("\nCreating model...")
-    model = GERL(config).to(device)
+    model = GERL(config, vocab=vocab).to(device)
     
     # 옵티마이저
     optimizer = optim.Adam(model.parameters(), lr=config.learning_rate)
@@ -117,7 +116,7 @@ def main():
     print(f"Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
     
     # 훈련 루프
-    best_val_loss = float('inf')
+    best_val_auc = 0.0  # AUC가 높을수록 좋음
     
     for epoch in range(config.num_epochs):
         print(f"\n========== Epoch {epoch+1}/{config.num_epochs} ==========")
@@ -126,22 +125,26 @@ def main():
         train_loss = train_epoch(model, train_loader, optimizer, device, config)
         print(f"Train Loss: {train_loss:.4f}")
         
-        # 평가
-        val_loss = evaluate_epoch(model, dev_loader, device)
-        print(f"Val Loss: {val_loss:.4f}")
+        # 평가 (논문의 지표 사용)
+        val_metrics = evaluate_epoch(model, dev_loader, device)
+        print_metrics(val_metrics, "Validation")
         
-        # 모델 저장
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
+        val_auc = val_metrics.get('AUC', 0.0)
+        val_loss = val_metrics.get('Loss', float('inf'))
+        
+        # 모델 저장 (AUC 기준)
+        if val_auc > best_val_auc:
+            best_val_auc = val_auc
             model_path = os.path.join(args.save_dir, 'gerl_best.pth')
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
-                'val_loss': val_loss,
-                'config': config
+                'val_metrics': val_metrics,
+                'config': config,
+                'vocab': vocab
             }, model_path)
-            print(f"Best model saved: {model_path}")
+            print(f"Best model saved (AUC: {val_auc:.4f}): {model_path}")
         
         # 매 에포크마다 체크포인트 저장
         checkpoint_path = os.path.join(args.save_dir, f'gerl_epoch_{epoch+1}.pth')
@@ -149,11 +152,12 @@ def main():
             'epoch': epoch,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
-            'val_loss': val_loss,
-            'config': config
+            'val_metrics': val_metrics,
+            'config': config,
+            'vocab': vocab
         }, checkpoint_path)
     
-    print(f"\nTraining completed! Best validation loss: {best_val_loss:.4f}")
+    print(f"\nTraining completed! Best validation AUC: {best_val_auc:.4f}")
 
 
 if __name__ == "__main__":

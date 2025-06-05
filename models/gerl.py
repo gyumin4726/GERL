@@ -9,10 +9,11 @@ from .graph_attention import GraphAttentionNetwork
 class GERL(nn.Module):
     """Graph Enhanced Representation Learning for News Recommendation"""
     
-    def __init__(self, config):
+    def __init__(self, config, vocab=None):
         super(GERL, self).__init__()
         
         self.config = config
+        self.vocab = vocab
         
         # 임베딩 레이어들
         self.user_embedding = nn.Embedding(
@@ -29,7 +30,9 @@ class GERL(nn.Module):
             num_heads=config.num_heads,
             num_topics=config.num_topics,
             topic_embed_dim=config.topic_embed_dim,
-            dropout=config.dropout
+            dropout=config.dropout,
+            vocab=vocab,
+            glove_path=getattr(config, 'glove_path', None)
         )
         
         # 뉴스 의미 표현 차원 계산
@@ -274,24 +277,64 @@ class GERL(nn.Module):
         # 긍정 샘플 점수
         pos_scores = self.predict(user_repr, news_repr)  # (batch_size,)
         
-        # 논문에 따른 negative sampling (λ=4)
-        # 실제 구현에서는 배치 내 다른 뉴스를 negative로 사용
+        # 논문 Eq.(5): L = -Σ_i log(exp(ŷ_i^+) / (exp(ŷ_i^+) + Σ_j exp(ŷ_{i,j}^-)))
+        # λ=4 negative sampling (논문 설정)
+        batch_size = user_repr.size(0)
+        
         if negative_samples is not None:
             # 명시적 negative samples가 제공된 경우
-            neg_user_repr = user_repr.unsqueeze(1).expand(-1, negative_samples.size(1), -1)  # (batch_size, num_neg, dim)
-            neg_scores = torch.sum(neg_user_repr * negative_samples, dim=-1)  # (batch_size, num_neg)
+            neg_user_repr = user_repr.unsqueeze(1).expand(-1, negative_samples.size(1), -1)
+            neg_scores = torch.sum(neg_user_repr * negative_samples, dim=-1)
         else:
-            # 배치 내 다른 뉴스들을 negative로 사용 (실용적 접근)
-            neg_scores = torch.matmul(user_repr, news_repr.transpose(0, 1))  # (batch_size, batch_size)
-            # 자기 자신 제외
-            mask = torch.eye(neg_scores.size(0), device=neg_scores.device).bool()
-            neg_scores = neg_scores.masked_fill(mask, float('-inf'))
+            # In-batch negative sampling 개선
+            # 각 사용자에 대해 배치 내 다른 모든 뉴스를 negative로 사용
+            all_news_repr = news_repr  # (batch_size, embed_dim)
+            
+            # 사용자 표현과 모든 뉴스 표현 간의 점수 계산
+            scores_matrix = torch.matmul(user_repr, all_news_repr.transpose(0, 1))  # (batch_size, batch_size)
+            
+            # 대각선(자기 자신) 제외하고 negative scores 추출
+            neg_scores_list = []
+            for i in range(batch_size):
+                # i번째 사용자의 negative scores (자기 자신 제외)
+                neg_scores_i = torch.cat([scores_matrix[i, :i], scores_matrix[i, i+1:]])
+                
+                # λ=4개만 랜덤 샘플링 (논문 설정)
+                if len(neg_scores_i) > self.config.negative_sampling_ratio:
+                    indices = torch.randperm(len(neg_scores_i))[:self.config.negative_sampling_ratio]
+                    neg_scores_i = neg_scores_i[indices]
+                
+                neg_scores_list.append(neg_scores_i)
+            
+            # 패딩하여 동일한 크기로 맞춤
+            max_neg_len = max(len(scores) for scores in neg_scores_list)
+            neg_scores = torch.zeros(batch_size, max_neg_len, device=user_repr.device)
+            
+            for i, scores in enumerate(neg_scores_list):
+                if len(scores) > 0:
+                    neg_scores[i, :len(scores)] = scores
+                    # 나머지는 매우 작은 값으로 채움
+                    if len(scores) < max_neg_len:
+                        neg_scores[i, len(scores):] = float('-inf')
         
-        # 논문 Eq.(5) - 최대 우도 손실
+        # 논문 Eq.(5) 구현
         pos_exp = torch.exp(pos_scores)  # (batch_size,)
-        neg_exp = torch.exp(neg_scores)  # (batch_size, num_neg)
+        
+        # negative scores에서 -inf 마스킹 처리
+        neg_scores_masked = neg_scores.clone()
+        neg_scores_masked[torch.isinf(neg_scores_masked)] = -1e8  # -inf를 큰 음수로 교체
+        neg_exp = torch.exp(neg_scores_masked)  # (batch_size, num_neg)
         neg_sum = torch.sum(neg_exp, dim=-1)  # (batch_size,)
         
+        # Numerical stability를 위한 처리
+        epsilon = 1e-8
+        denominator = pos_exp + neg_sum + epsilon
+        
         # log-likelihood 최대화 = negative log-likelihood 최소화
-        loss = -torch.log(pos_exp / (pos_exp + neg_sum + 1e-8))
+        loss = -torch.log(pos_exp / denominator)
+        
+        # NaN이나 inf 값 확인 및 처리
+        loss = torch.where(torch.isnan(loss) | torch.isinf(loss), 
+                          torch.zeros_like(loss), loss)
+        
         return loss.mean() 
