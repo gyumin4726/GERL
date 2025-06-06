@@ -18,9 +18,11 @@ import argparse
 from collections import defaultdict
 from tqdm import tqdm
 import time
+import torch
+import numpy as np
 
 
-def load_mind_data(data_dir, split="train"):
+def load_mind_data(data_dir, split="train", sample_ratio=None):
     """MIND 데이터 로드"""
     print(f"Loading {split} data from {data_dir}...")
     
@@ -44,6 +46,25 @@ def load_mind_data(data_dir, split="train"):
         header=None
     )
     behaviors_df.columns = ['impression_id', 'user_id', 'time', 'clicked_news', 'impressions']
+    
+    # 데이터 샘플링 (small 옵션)
+    if sample_ratio and sample_ratio < 1.0:
+        print(f"   Sampling data: {sample_ratio*100:.1f}% of original")
+        behaviors_df = behaviors_df.sample(frac=sample_ratio, random_state=42).reset_index(drop=True)
+        
+        # 사용된 뉴스만 필터링
+        used_news = set()
+        for _, row in behaviors_df.iterrows():
+            if pd.notna(row['clicked_news']):
+                used_news.update(row['clicked_news'].split())
+            if pd.notna(row['impressions']):
+                for impression in row['impressions'].split():
+                    if '-' in impression:
+                        news_id = impression.split('-')[0]
+                        used_news.add(news_id)
+        
+        news_df = news_df[news_df['news_id'].isin(used_news)].reset_index(drop=True)
+        print(f"   Filtered to {len(news_df)} relevant news articles")
     
     print(f"Data loaded: {len(news_df)} news, {len(behaviors_df)} behaviors")
     return news_df, behaviors_df
@@ -78,7 +99,7 @@ def build_vocabulary(news_df, save_path):
 
 def build_user_news_mappings(behaviors_df, news_df):
     """사용자-뉴스 매핑 구축"""
-    print("🔗 Building user-news mappings...")
+    print("Building user-news mappings...")
     
     # 뉴스 정보를 딕셔너리로 변환
     news_dict = {}
@@ -115,12 +136,127 @@ def build_user_news_mappings(behaviors_df, news_df):
     return news_dict, user_clicked_news, news_to_users, user_to_news
 
 
-def build_neighbor_graphs(news_to_users, user_to_news):
+def build_neighbor_graphs(news_to_users, user_to_news, max_neighbors=None, use_gpu=False):
     """이웃 그래프 구축 (논문의 핵심 로직)"""
-    print("🕸️  Building neighbor graphs...")
+    print("Building neighbor graphs...")
+    if max_neighbors:
+        print(f"   Limiting to max {max_neighbors} neighbors per node")
     
-    # 논문: "동일한 사용자가 본 뉴스로 간주되어 이웃 뉴스로 정의"
-    print("   Building news neighbor graph...")
+    device = 'cuda' if use_gpu and torch.cuda.is_available() else 'cpu'
+    if use_gpu and torch.cuda.is_available():
+        print(f"   Using GPU acceleration: {torch.cuda.get_device_name()}")
+    else:
+        print("   Using CPU")
+    
+    if use_gpu and torch.cuda.is_available() and len(user_to_news) > 1000:
+        return build_neighbor_graphs_gpu(news_to_users, user_to_news, max_neighbors, device)
+    else:
+        return build_neighbor_graphs_cpu(news_to_users, user_to_news, max_neighbors)
+
+
+def build_neighbor_graphs_gpu(news_to_users, user_to_news, max_neighbors, device):
+    """GPU 가속 이웃 그래프 구축"""
+    print("   Building neighbor graphs with GPU acceleration...")
+    
+    # ID를 숫자로 매핑
+    all_news = list(set().union(*[news_set for news_set in user_to_news.values()]))
+    all_users = list(user_to_news.keys())
+    
+    news_to_idx = {news_id: idx for idx, news_id in enumerate(all_news)}
+    user_to_idx = {user_id: idx for idx, user_id in enumerate(all_users)}
+    
+    print(f"   Processing {len(all_users)} users, {len(all_news)} news items")
+    
+    # 뉴스 이웃 그래프 구축 (GPU)
+    print("   Building news neighbor graph (GPU)...")
+    news_neighbors = defaultdict(set)
+    
+    # 배치 처리로 메모리 효율성 향상
+    batch_size = 1000
+    for i in tqdm(range(0, len(all_users), batch_size), desc="GPU news neighbors"):
+        batch_users = all_users[i:i+batch_size]
+        
+        # 배치 내 사용자들의 뉴스 리스트
+        batch_news_lists = []
+        batch_user_masks = []
+        max_news_per_user = 0
+        
+        for user_id in batch_users:
+            news_list = [news_to_idx[news_id] for news_id in user_to_news[user_id]]
+            batch_news_lists.append(news_list)
+            max_news_per_user = max(max_news_per_user, len(news_list))
+        
+        if max_news_per_user > 1:
+            # 패딩하여 텐서로 변환
+            padded_news = torch.full((len(batch_users), max_news_per_user), -1, dtype=torch.long, device=device)
+            masks = torch.zeros((len(batch_users), max_news_per_user), dtype=torch.bool, device=device)
+            
+            for j, news_list in enumerate(batch_news_lists):
+                if len(news_list) > 1:
+                    padded_news[j, :len(news_list)] = torch.tensor(news_list, device=device)
+                    masks[j, :len(news_list)] = True
+            
+            # GPU에서 이웃 관계 계산
+            for j in range(len(batch_users)):
+                if masks[j].sum() > 1:
+                    valid_news = padded_news[j][masks[j]]
+                    # 모든 쌍 생성
+                    news1 = valid_news.unsqueeze(1).expand(-1, len(valid_news))
+                    news2 = valid_news.unsqueeze(0).expand(len(valid_news), -1)
+                    
+                    # 자기 자신 제외
+                    mask = news1 != news2
+                    pairs = torch.stack([news1[mask], news2[mask]], dim=1)
+                    
+                    # CPU로 다시 변환하여 딕셔너리에 추가
+                    pairs_cpu = pairs.cpu().numpy()
+                    for n1_idx, n2_idx in pairs_cpu:
+                        news_neighbors[all_news[n1_idx]].add(all_news[n2_idx])
+    
+    # 사용자 이웃 그래프 구축 (GPU)
+    print("   Building user neighbor graph (GPU)...")
+    user_neighbors = defaultdict(set)
+    
+    all_news_with_users = list(news_to_users.keys())
+    for i in tqdm(range(0, len(all_news_with_users), batch_size), desc="GPU user neighbors"):
+        batch_news = all_news_with_users[i:i+batch_size]
+        
+        for news_id in batch_news:
+            user_list = list(news_to_users[news_id])
+            if len(user_list) > 1:
+                user_indices = torch.tensor([user_to_idx.get(uid, -1) for uid in user_list if uid in user_to_idx], device=device)
+                
+                if len(user_indices) > 1:
+                    # 모든 사용자 쌍 생성
+                    user1 = user_indices.unsqueeze(1).expand(-1, len(user_indices))
+                    user2 = user_indices.unsqueeze(0).expand(len(user_indices), -1)
+                    
+                    # 자기 자신 제외
+                    mask = user1 != user2
+                    pairs = torch.stack([user1[mask], user2[mask]], dim=1)
+                    
+                    # CPU로 다시 변환하여 딕셔너리에 추가
+                    pairs_cpu = pairs.cpu().numpy()
+                    for u1_idx, u2_idx in pairs_cpu:
+                        user_neighbors[all_users[u1_idx]].add(all_users[u2_idx])
+    
+    # 이웃 수 제한
+    if max_neighbors:
+        print(f"   Limiting neighbors to {max_neighbors}...")
+        for news_id in news_neighbors:
+            if len(news_neighbors[news_id]) > max_neighbors:
+                news_neighbors[news_id] = set(list(news_neighbors[news_id])[:max_neighbors])
+        
+        for user_id in user_neighbors:
+            if len(user_neighbors[user_id]) > max_neighbors:
+                user_neighbors[user_id] = set(list(user_neighbors[user_id])[:max_neighbors])
+    
+    return news_neighbors, user_neighbors
+
+
+def build_neighbor_graphs_cpu(news_to_users, user_to_news, max_neighbors):
+    """CPU 버전 이웃 그래프 구축"""
+    print("   Building news neighbor graph (CPU)...")
     news_neighbors = defaultdict(set)
     
     for user_id, news_set in tqdm(user_to_news.items(), desc="Processing users for news neighbors"):
@@ -131,8 +267,14 @@ def build_neighbor_graphs(news_to_users, user_to_news):
                     if i != j:
                         news_neighbors[news1].add(news2)
     
+    # 이웃 수 제한 (뉴스)
+    if max_neighbors:
+        for news_id in news_neighbors:
+            if len(news_neighbors[news_id]) > max_neighbors:
+                news_neighbors[news_id] = set(list(news_neighbors[news_id])[:max_neighbors])
+    
     # 논문: "특정 사용자는 동일한 클릭한 뉴스를 공유하여 이웃 사용자로 정의"
-    print("   Building user neighbor graph...")
+    print("   Building user neighbor graph (CPU)...")
     user_neighbors = defaultdict(set)
     
     for news_id, user_set in tqdm(news_to_users.items(), desc="Processing news for user neighbors"):
@@ -142,6 +284,12 @@ def build_neighbor_graphs(news_to_users, user_to_news):
                 for j, user2 in enumerate(user_list):
                     if i != j:
                         user_neighbors[user1].add(user2)
+    
+    # 이웃 수 제한 (사용자)
+    if max_neighbors:
+        for user_id in user_neighbors:
+            if len(user_neighbors[user_id]) > max_neighbors:
+                user_neighbors[user_id] = set(list(user_neighbors[user_id])[:max_neighbors])
     
     print(f"Neighbor graphs built:")
     print(f"   News with neighbors: {len(news_neighbors)}")
@@ -173,13 +321,20 @@ def save_graph_data(graph_data, save_path):
     print(f"Graph saved: {file_size:.1f} MB")
 
 
-def build_for_split(data_dir, split, vocab=None, force_rebuild=False):
+def build_for_split(data_dir, split, vocab=None, force_rebuild=False, small_mode=False, sample_ratio=0.3, max_neighbors=50, use_gpu=False):
     """특정 split에 대한 그래프 구축"""
     print(f"\nProcessing {split} split...")
+    if small_mode:
+        print(f"   Small mode: sampling {sample_ratio*100:.1f}%, max {max_neighbors} neighbors")
     
     # 파일 경로 설정
     vocab_path = os.path.join(data_dir, "vocab.pkl")
     graph_path = os.path.join(data_dir, f"graph_{split}.pkl")
+    
+    # small 모드일 때 파일명 변경
+    if small_mode:
+        vocab_path = os.path.join(data_dir, "vocab_small.pkl")
+        graph_path = os.path.join(data_dir, f"graph_{split}_small.pkl")
     
     # 기존 파일 확인
     if not force_rebuild and os.path.exists(graph_path):
@@ -189,7 +344,8 @@ def build_for_split(data_dir, split, vocab=None, force_rebuild=False):
     start_time = time.time()
     
     # 1. 데이터 로드
-    news_df, behaviors_df = load_mind_data(data_dir, split)
+    sample_ratio_param = sample_ratio if small_mode else None
+    news_df, behaviors_df = load_mind_data(data_dir, split, sample_ratio_param)
     
     # 2. 어휘 구축 (train에서만)
     if split == 'train':
@@ -207,7 +363,8 @@ def build_for_split(data_dir, split, vocab=None, force_rebuild=False):
     )
     
     # 4. 이웃 그래프 구축
-    news_neighbors, user_neighbors = build_neighbor_graphs(news_to_users, user_to_news)
+    max_neighbors_param = max_neighbors if small_mode else None
+    news_neighbors, user_neighbors = build_neighbor_graphs(news_to_users, user_to_news, max_neighbors_param, use_gpu)
     
     # 5. 그래프 데이터 저장
     graph_data = {
@@ -234,6 +391,10 @@ def main():
     parser.add_argument('--split', default=None, choices=['train', 'dev'], 
                        help='Data split to process (default: both train and dev)')
     parser.add_argument('--force_rebuild', action='store_true', help='Force rebuild even if files exist')
+    parser.add_argument('--small', action='store_true', help='Build smaller graphs (under 750MB total)')
+    parser.add_argument('--sample_ratio', type=float, default=0.3, help='Data sampling ratio for small graphs (default: 0.3)')
+    parser.add_argument('--max_neighbors', type=int, default=50, help='Max neighbors per node for small graphs (default: 50)')
+    parser.add_argument('--gpu', action='store_true', help='Use GPU acceleration for graph building')
     
     args = parser.parse_args()
     
@@ -273,13 +434,29 @@ def main():
     total_start_time = time.time()
     vocab = None
     
+    if args.small:
+        print(f"Small graph mode enabled:")
+        print(f"   Sample ratio: {args.sample_ratio*100:.1f}%")
+        print(f"   Max neighbors: {args.max_neighbors}")
+        print(f"   Target: < 750MB total")
+        print()
+    
+    if args.gpu:
+        if torch.cuda.is_available():
+            print(f"GPU acceleration enabled: {torch.cuda.get_device_name()}")
+        else:
+            print("GPU requested but not available, using CPU")
+        print()
+    
     # train을 먼저 처리 (어휘 구축을 위해)
     if 'train' in splits_to_process:
-        vocab = build_for_split(args.data_dir, 'train', vocab, args.force_rebuild)
+        vocab = build_for_split(args.data_dir, 'train', vocab, args.force_rebuild, 
+                               args.small, args.sample_ratio, args.max_neighbors, args.gpu)
     
     # dev 처리
     if 'dev' in splits_to_process:
-        vocab = build_for_split(args.data_dir, 'dev', vocab, args.force_rebuild)
+        vocab = build_for_split(args.data_dir, 'dev', vocab, args.force_rebuild, 
+                               args.small, args.sample_ratio, args.max_neighbors, args.gpu)
     
     # 전체 완료 시간 출력
     total_elapsed_time = time.time() - total_start_time

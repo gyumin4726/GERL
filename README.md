@@ -1,5 +1,22 @@
 # GERL: Graph Enhanced Representation Learning for News Recommendation
 
+## Quick Start
+
+프로젝트를 빠르게 실행하려면 다음 단계를 따르십시오:
+
+```bash
+# 1. 데이터 준비 (MIND 데이터셋 다운로드 후)
+python check_data.py
+
+# 2. Small 그래프 구축 (권장)
+python build_graph.py --small --gpu
+
+# 3. 훈련 시작
+python train.py
+```
+
+자세한 설명은 아래 섹션을 참조하십시오.
+
 ## 프로젝트 구조
 
 ```
@@ -109,29 +126,64 @@ data/MIND_small/
 
 훈련 전에 먼저 그래프를 구축하세요. 이는 훈련 속도를 크게 향상시킵니다:
 
+#### Small 버전 (권장) - 빠른 테스트와 개발용
+
+메모리와 시간을 절약하면서 빠르게 테스트하려면 small 버전을 사용하십시오:
+
 ```bash
-# 한 번에 모든 그래프 구축 (train + dev)
+# Small 버전 그래프 구축 (30% 샘플링, 최대 50개 이웃)
+python build_graph.py --small
+
+# GPU 가속 사용
+python build_graph.py --small --gpu
+
+# 커스텀 설정
+python build_graph.py --small --sample_ratio 0.2 --max_neighbors 30
+```
+
+Small 버전 특징:
+- **데이터 크기**: 원본의 30% 샘플링 (기본값)
+- **이웃 수 제한**: 최대 50개 이웃으로 제한 (기본값)  
+- **파일 크기**: 각 그래프 파일 < 750MB (총 < 2.25GB)
+- **속도**: 빠른 로딩과 훈련 가능
+- **용도**: 개발, 테스트, 빠른 실험에 적합
+
+#### Standard 버전 - 전체 데이터셋
+
+전체 성능을 원한다면 standard 버전을 사용하십시오:
+
+```bash
+# 전체 데이터셋으로 그래프 구축
 python build_graph.py
+
+# GPU 가속 사용
+python build_graph.py --gpu
 ```
 
-특정 split만 처리하려면:
+#### 기타 옵션
+
 ```bash
-# 훈련 데이터만
-python build_graph.py --split train
+# 특정 split만 처리
+python build_graph.py --small --split train
+python build_graph.py --small --split dev
 
-# 검증 데이터만  
-python build_graph.py --split dev
+# 강제로 재구축
+python build_graph.py --small --force_rebuild
 ```
 
-강제로 재구축:
-```bash
-python build_graph.py --force_rebuild
-```
+#### 생성되는 파일들
 
-이 단계에서 생성되는 파일들:
+Small 버전:
+- `data/MIND_small/vocab_small.pkl` - 어휘 사전 (small)
+- `data/MIND_small/graph_train_small.pkl` - 훈련용 이분 그래프 (small)
+- `data/MIND_small/graph_dev_small.pkl` - 검증용 이분 그래프 (small)
+
+Standard 버전:
 - `data/MIND_small/vocab.pkl` - 어휘 사전
 - `data/MIND_small/graph_train.pkl` - 훈련용 이분 그래프
 - `data/MIND_small/graph_dev.pkl` - 검증용 이분 그래프
+
+**참고**: 훈련 스크립트는 자동으로 small 버전이 있으면 우선적으로 사용합니다.
 
 ### 2. 빠른 테스트
 
@@ -153,10 +205,19 @@ python train.py --batch_size 32 --epochs 10 --lr 0.001
 
 ### 주의사항
 
-- 첫 실행 전 반드시 `build_graph.py`를 실행하세요
-- 세부 설정은 `config.py`에서 변경하세요
-- 모델은 자동으로 `saved_models/` 폴더에 저장됩니다
-- 그래프 구축은 시간이 걸리지만 한 번만 하면 됩니다
+- **필수**: 첫 실행 전 반드시 `build_graph.py`를 실행하십시오
+- **권장**: 빠른 시작을 위해 `--small` 옵션 사용 권장
+- **설정**: 세부 설정은 `utils/config.py`에서 변경하십시오
+- **저장**: 모델은 자동으로 `saved_models/` 폴더에 저장됩니다
+- **시간**: 그래프 구축은 시간이 걸리지만 한 번만 하면 됩니다
+- **우선순위**: 훈련 시 small 버전이 있으면 자동으로 우선 사용됩니다
+
+### 성능 최적화 방법
+
+1. **빠른 개발**: `--small --gpu` 옵션으로 시작
+2. **메모리 부족 시**: `--sample_ratio 0.1 --max_neighbors 20`으로 더 작게 설정
+3. **최종 성능**: 개발 완료 후 전체 데이터셋으로 재훈련
+4. **GPU 활용**: 그래프 구축과 훈련 모두에서 `--gpu` 옵션 사용
 
 ## 모델 특징
 

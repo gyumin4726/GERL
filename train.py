@@ -55,7 +55,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--data_dir', default='data/MIND_small', help='Data directory')
     parser.add_argument('--batch_size', type=int, default=64, help='Batch size')
-    parser.add_argument('--epochs', type=int, default=5, help='Number of epochs')
+    parser.add_argument('--epochs', type=int, default=1, help='Number of epochs')
     parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate')
     parser.add_argument('--save_dir', default='saved_models', help='Model save directory')
     
@@ -64,20 +64,32 @@ def main():
     print(" GERL Training")
     print("=" * 50)
     
-    # 그래프 파일 존재 여부 확인
+    # 그래프 파일 존재 여부 확인 (small 버전 우선)
+    vocab_small_path = os.path.join(args.data_dir, "vocab_small.pkl")
+    train_graph_small_path = os.path.join(args.data_dir, "graph_train_small.pkl")
     vocab_path = os.path.join(args.data_dir, "vocab.pkl")
     train_graph_path = os.path.join(args.data_dir, "graph_train.pkl")
     
-    if not os.path.exists(vocab_path) or not os.path.exists(train_graph_path):
+    # Small 버전이 있으면 우선 사용
+    if os.path.exists(vocab_small_path) and os.path.exists(train_graph_small_path):
+        print("Using small pre-built graph files for fast loading")
+        print(f"   Vocab: {vocab_small_path}")
+        print(f"   Train graph: {train_graph_small_path}")
+        use_small = True
+    elif os.path.exists(vocab_path) and os.path.exists(train_graph_path):
+        print("Using standard pre-built graph files")
+        print(f"   Vocab: {vocab_path}")
+        print(f"   Train graph: {train_graph_path}")
+        use_small = False
+    else:
         print(" Pre-built graph files not found!")
         print("For optimal training performance, please run:")
-        print(f"   python build_graph.py")
+        print(f"   python build_graph.py --small  (recommended, faster)")
+        print(f"   python build_graph.py          (full dataset)")
         print()
         print("Continuing with in-memory graph building (slower)...")
-        print()
-    else:
-        print("Using pre-built graph files for fast loading")
-        print()
+        use_small = False
+    print()
     
     # 설정
     config = Config(

@@ -20,20 +20,32 @@ class MINDDataset(Dataset):
         self.max_clicked_news = max_clicked_news
         self.max_neighbors = max_neighbors
         
-        # 어휘 사전 경로
+        # 어휘 사전 경로 (small 버전 우선)
+        self.vocab_small_path = os.path.join(data_dir, "vocab_small.pkl")
+        self.graph_small_path = os.path.join(data_dir, f"graph_{split}_small.pkl")
         self.vocab_path = os.path.join(data_dir, "vocab.pkl")
         self.graph_path = os.path.join(data_dir, f"graph_{split}.pkl")
+        
+        # Small 버전이 있으면 우선 사용
+        if os.path.exists(self.vocab_small_path) and os.path.exists(self.graph_small_path):
+            self.vocab_path = self.vocab_small_path
+            self.graph_path = self.graph_small_path
+            self.use_small = True
+        else:
+            self.use_small = False
         
         # 어휘 사전 로드 (build_graph.py에서 생성된 것 사용)
         self.load_vocab()
         
         # 그래프와 데이터 로드 (build_graph.py에서 생성된 것 우선 사용)
         if os.path.exists(self.graph_path):
-            print("Using pre-built graph and data from build_graph.py")
+            version_type = "small" if self.use_small else "standard"
+            print(f"Using pre-built graph and data from build_graph.py ({version_type} version)")
             self.load_graph_and_data()
         else:
             print(" Pre-built graph not found! Please run:")
-            print(f"   python build_graph.py --data_dir {data_dir} --split {split}")
+            print(f"   python build_graph.py --small --data_dir {data_dir} --split {split}  (recommended)")
+            print(f"   python build_graph.py --data_dir {data_dir} --split {split}          (full dataset)")
             print("   Falling back to in-memory graph building...")
             # 기존 방식으로 폴백
             self.load_data()
@@ -51,7 +63,8 @@ class MINDDataset(Dataset):
     def load_vocab(self):
         """어휘 사전 로드 (build_graph.py에서 생성된 것)"""
         if os.path.exists(self.vocab_path):
-            print("Loading vocabulary from build_graph.py...")
+            version_type = "small" if self.use_small else "standard"
+            print(f"Loading vocabulary from build_graph.py ({version_type} version)...")
             with open(self.vocab_path, 'rb') as f:
                 self.vocab = pickle.load(f)
             print(f"Vocabulary loaded: {len(self.vocab)} words")
@@ -60,25 +73,55 @@ class MINDDataset(Dataset):
             print("   Creating basic vocabulary...")
             self.vocab = {'<PAD>': 0, '<UNK>': 1}
     
+    def _load_pickle_with_progress(self, file_path):
+        """tqdm을 사용한 pickle 파일 로딩"""
+        file_size = os.path.getsize(file_path)
+        
+        with open(file_path, 'rb') as f:
+            with tqdm(total=file_size, unit='B', unit_scale=True, 
+                     desc="   Loading graph", ncols=80) as pbar:
+                
+                # 작은 청크로 읽으면서 진행률 업데이트
+                data = bytearray()
+                chunk_size = 8192  # 8KB씩 읽기
+                
+                while True:
+                    chunk = f.read(chunk_size)
+                    if not chunk:
+                        break
+                    data.extend(chunk)
+                    pbar.update(len(chunk))
+                
+                # 메모리에서 pickle 로드
+                pbar.set_description("   Deserializing")
+                return pickle.loads(data)
+    
     def load_graph_and_data(self):
         """build_graph.py에서 생성된 그래프와 데이터 로드"""
         print(" Loading pre-built graph and data...")
-        print("   Loading graph file (this may take a moment)...")
-        with open(self.graph_path, 'rb') as f:
-            graph_data = pickle.load(f)
+        
+        # 파일 크기 확인하여 예상 로딩 시간 안내
+        file_size_mb = os.path.getsize(self.graph_path) / (1024 * 1024)
+        print(f"   Graph file size: {file_size_mb:.1f} MB")
+        
+        # tqdm으로 파일 로딩 진행률 표시
+        graph_data = self._load_pickle_with_progress(self.graph_path)
         print("   Graph file loaded successfully!")
         
         # 그래프 정보 로드
-        self.news_to_users = defaultdict(set, {k: set(v) for k, v in graph_data['news_to_users'].items()})
-        self.user_to_news = defaultdict(set, {k: set(v) for k, v in graph_data['user_to_news'].items()})
-        self.news_neighbors = defaultdict(set, {k: set(v) for k, v in graph_data['news_neighbors'].items()})
-        self.user_neighbors = defaultdict(set, {k: set(v) for k, v in graph_data['user_neighbors'].items()})
+        print("   Converting graph data structures...")
+        self.news_to_users = defaultdict(set, {k: set(v) for k, v in tqdm(graph_data['news_to_users'].items(), desc="   News->Users")})
+        self.user_to_news = defaultdict(set, {k: set(v) for k, v in tqdm(graph_data['user_to_news'].items(), desc="   User->News")})
+        self.news_neighbors = defaultdict(set, {k: set(v) for k, v in tqdm(graph_data['news_neighbors'].items(), desc="   News neighbors")})
+        self.user_neighbors = defaultdict(set, {k: set(v) for k, v in tqdm(graph_data['user_neighbors'].items(), desc="   User neighbors")})
         
         # 뉴스 정보와 사용자 클릭 히스토리 로드
+        print("   Loading news dictionary and user histories...")
         self.news_dict = graph_data['news_dict']
         self.user_clicked_news = defaultdict(list, graph_data['user_clicked_news'])
         
         # 행동 데이터도 로드 (샘플 생성용)
+        print("   Loading behavior data...")
         behaviors_path = f"{self.data_dir}/{self.split}/behaviors.tsv"
         self.behaviors_df = pd.read_csv(behaviors_path, sep='\t', header=None)
         self.behaviors_df.columns = ['impression_id', 'user_id', 'time', 'clicked_news', 'impressions']
@@ -434,15 +477,22 @@ def create_data_loaders(data_dir="data/MIND_small", batch_size=32, rebuild_graph
     """데이터 로더 생성 - build_graph.py 사용 권장"""
     from torch.utils.data import DataLoader
     
-    # build_graph.py 실행 여부 확인
+    # build_graph.py 실행 여부 확인 (small 버전 우선)
+    vocab_small_path = os.path.join(data_dir, "vocab_small.pkl")
+    train_graph_small_path = os.path.join(data_dir, "graph_train_small.pkl")
     vocab_path = os.path.join(data_dir, "vocab.pkl")
     train_graph_path = os.path.join(data_dir, "graph_train.pkl")
-    dev_graph_path = os.path.join(data_dir, "graph_dev.pkl")
     
-    if not os.path.exists(vocab_path) or not os.path.exists(train_graph_path):
+    # Small 버전이 있는지 먼저 확인
+    if os.path.exists(vocab_small_path) and os.path.exists(train_graph_small_path):
+        print("Found small pre-built graph files - using for fast loading!")
+    elif os.path.exists(vocab_path) and os.path.exists(train_graph_path):
+        print("Found standard pre-built graph files")
+    else:
         print(" Pre-built graph files not found!")
         print(" For optimal performance, please run:")
-        print(f"   python build_graph.py")
+        print(f"   python build_graph.py --small  (recommended, faster)")
+        print(f"   python build_graph.py          (full dataset)")
         print("   This will significantly speed up data loading!")
         print()
     
