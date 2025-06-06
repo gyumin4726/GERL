@@ -105,14 +105,42 @@ data/MIND_small/
 
 ## 사용법
 
-### 빠른 테스트
+### 1. 그래프 구축 (권장 - 필수 단계)
 
-먼저 모든 것이 올바르게 설정되었는지 확인:
+훈련 전에 먼저 그래프를 구축하세요. 이는 훈련 속도를 크게 향상시킵니다:
+
+```bash
+# 한 번에 모든 그래프 구축 (train + dev)
+python build_graph.py
+```
+
+특정 split만 처리하려면:
+```bash
+# 훈련 데이터만
+python build_graph.py --split train
+
+# 검증 데이터만  
+python build_graph.py --split dev
+```
+
+강제로 재구축:
+```bash
+python build_graph.py --force_rebuild
+```
+
+이 단계에서 생성되는 파일들:
+- `data/MIND_small/vocab.pkl` - 어휘 사전
+- `data/MIND_small/graph_train.pkl` - 훈련용 이분 그래프
+- `data/MIND_small/graph_dev.pkl` - 검증용 이분 그래프
+
+### 2. 빠른 테스트
+
+모든 것이 올바르게 설정되었는지 확인:
 ```bash
 python quick_test.py
 ```
 
-### 훈련
+### 3. 훈련
 
 ```bash
 python train.py
@@ -125,9 +153,10 @@ python train.py --batch_size 32 --epochs 10 --lr 0.001
 
 ### 주의사항
 
-- GPU 메모리가 부족한 경우 `config.py`에서 배치 크기를 줄이세요
-- 첫 실행 시 데이터 로딩에 시간이 걸릴 수 있습니다
+- 첫 실행 전 반드시 `build_graph.py`를 실행하세요
+- 세부 설정은 `config.py`에서 변경하세요
 - 모델은 자동으로 `saved_models/` 폴더에 저장됩니다
+- 그래프 구축은 시간이 걸리지만 한 번만 하면 됩니다
 
 ## 모델 특징
 

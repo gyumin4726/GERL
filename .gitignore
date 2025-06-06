@@ -1,7 +1,10 @@
 # 데이터 폴더 (저작권 보호)
-data/Mind_small
 *.zip
 *.tsv
+*.vec
+/data/Mind_small
+
+.gitignore
 
 # Python 가상환경
 gerl_env/

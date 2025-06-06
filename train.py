@@ -61,6 +61,24 @@ def main():
     
     args = parser.parse_args()
     
+    print(" GERL Training")
+    print("=" * 50)
+    
+    # 그래프 파일 존재 여부 확인
+    vocab_path = os.path.join(args.data_dir, "vocab.pkl")
+    train_graph_path = os.path.join(args.data_dir, "graph_train.pkl")
+    
+    if not os.path.exists(vocab_path) or not os.path.exists(train_graph_path):
+        print(" Pre-built graph files not found!")
+        print("For optimal training performance, please run:")
+        print(f"   python build_graph.py")
+        print()
+        print("Continuing with in-memory graph building (slower)...")
+        print()
+    else:
+        print("Using pre-built graph files for fast loading")
+        print()
+    
     # 설정
     config = Config(
         batch_size=args.batch_size,
@@ -80,7 +98,7 @@ def main():
     train_loader, dev_loader = create_data_loaders(
         data_dir=args.data_dir, 
         batch_size=config.batch_size,
-        rebuild_graph=False  # 첫 실행시 True로 설정하여 그래프 구축
+        rebuild_graph=False
     )
     
     # 첫 번째 배치에서 실제 데이터 크기 확인

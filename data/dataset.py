@@ -6,6 +6,7 @@ from collections import defaultdict
 import random
 import pickle
 import os
+from tqdm import tqdm
 
 
 class MINDDataset(Dataset):
@@ -23,18 +24,71 @@ class MINDDataset(Dataset):
         self.vocab_path = os.path.join(data_dir, "vocab.pkl")
         self.graph_path = os.path.join(data_dir, f"graph_{split}.pkl")
         
-        # 데이터 로드
-        self.load_data()
+        # 어휘 사전 로드 (build_graph.py에서 생성된 것 사용)
+        self.load_vocab()
         
-        # 어휘 사전 구축 또는 로드
-        self.load_or_build_vocab()
-        
-        # 그래프 구축 또는 로드 (논문의 이분 그래프)
-        if rebuild_graph or not os.path.exists(self.graph_path):
-            self.build_graph()
+        # 그래프와 데이터 로드 (build_graph.py에서 생성된 것 우선 사용)
+        if os.path.exists(self.graph_path):
+            print("Using pre-built graph and data from build_graph.py")
+            self.load_graph_and_data()
         else:
-            self.load_graph()
+            print(" Pre-built graph not found! Please run:")
+            print(f"   python build_graph.py --data_dir {data_dir} --split {split}")
+            print("   Falling back to in-memory graph building...")
+            # 기존 방식으로 폴백
+            self.load_data()
+            if rebuild_graph or not os.path.exists(self.graph_path):
+                self.build_graph()
+            else:
+                self.load_graph()
         
+        # 샘플 생성
+        self.samples = []
+        self.create_samples()
+        
+        print(f"Dataset ready: {len(self.samples)} samples")
+    
+    def load_vocab(self):
+        """어휘 사전 로드 (build_graph.py에서 생성된 것)"""
+        if os.path.exists(self.vocab_path):
+            print("Loading vocabulary from build_graph.py...")
+            with open(self.vocab_path, 'rb') as f:
+                self.vocab = pickle.load(f)
+            print(f"Vocabulary loaded: {len(self.vocab)} words")
+        else:
+            print(" Vocabulary not found! Please run build_graph.py first")
+            print("   Creating basic vocabulary...")
+            self.vocab = {'<PAD>': 0, '<UNK>': 1}
+    
+    def load_graph_and_data(self):
+        """build_graph.py에서 생성된 그래프와 데이터 로드"""
+        print(" Loading pre-built graph and data...")
+        print("   Loading graph file (this may take a moment)...")
+        with open(self.graph_path, 'rb') as f:
+            graph_data = pickle.load(f)
+        print("   Graph file loaded successfully!")
+        
+        # 그래프 정보 로드
+        self.news_to_users = defaultdict(set, {k: set(v) for k, v in graph_data['news_to_users'].items()})
+        self.user_to_news = defaultdict(set, {k: set(v) for k, v in graph_data['user_to_news'].items()})
+        self.news_neighbors = defaultdict(set, {k: set(v) for k, v in graph_data['news_neighbors'].items()})
+        self.user_neighbors = defaultdict(set, {k: set(v) for k, v in graph_data['user_neighbors'].items()})
+        
+        # 뉴스 정보와 사용자 클릭 히스토리 로드
+        self.news_dict = graph_data['news_dict']
+        self.user_clicked_news = defaultdict(list, graph_data['user_clicked_news'])
+        
+        # 행동 데이터도 로드 (샘플 생성용)
+        behaviors_path = f"{self.data_dir}/{self.split}/behaviors.tsv"
+        self.behaviors_df = pd.read_csv(behaviors_path, sep='\t', header=None)
+        self.behaviors_df.columns = ['impression_id', 'user_id', 'time', 'clicked_news', 'impressions']
+        
+        print(f"Graph loaded:")
+        print(f"   News nodes: {len(self.news_neighbors)}")
+        print(f"   User nodes: {len(self.user_neighbors)}")
+        print(f"   News database: {len(self.news_dict)}")
+        print(f"   User histories: {len(self.user_clicked_news)}")
+    
     def load_data(self):
         """데이터 로드"""
         print(f"Loading {self.split} data...")
@@ -80,7 +134,7 @@ class MINDDataset(Dataset):
         print(f"Loaded {len(self.samples)} samples")
     
     def load_or_build_vocab(self):
-        """어휘 사전 구축 또는 로드"""
+        """어휘 사전 구축 또는 로드 (DEPRECATED - 이제 load_vocab 사용)"""
         if os.path.exists(self.vocab_path):
             print("Loading existing vocabulary...")
             with open(self.vocab_path, 'rb') as f:
@@ -160,7 +214,7 @@ class MINDDataset(Dataset):
         print(f"Graph built: {len(self.news_neighbors)} news nodes, {len(self.user_neighbors)} user nodes")
     
     def load_graph(self):
-        """저장된 그래프 로드"""
+        """저장된 그래프 로드 (DEPRECATED - load_graph_and_data 사용)"""
         print("Loading existing graph...")
         with open(self.graph_path, 'rb') as f:
             graph_data = pickle.load(f)
@@ -225,7 +279,8 @@ class MINDDataset(Dataset):
     
     def create_samples(self):
         """학습 샘플 생성"""
-        for _, row in self.behaviors_df.iterrows():
+        print("   Creating training samples...")
+        for _, row in tqdm(self.behaviors_df.iterrows(), total=len(self.behaviors_df), desc="Processing behaviors for samples"):
             if pd.isna(row['impressions']):
                 continue
                 
@@ -376,11 +431,23 @@ class MINDDataset(Dataset):
 
 
 def create_data_loaders(data_dir="data/MIND_small", batch_size=32, rebuild_graph=False):
-    """데이터 로더 생성"""
+    """데이터 로더 생성 - build_graph.py 사용 권장"""
     from torch.utils.data import DataLoader
     
+    # build_graph.py 실행 여부 확인
+    vocab_path = os.path.join(data_dir, "vocab.pkl")
+    train_graph_path = os.path.join(data_dir, "graph_train.pkl")
+    dev_graph_path = os.path.join(data_dir, "graph_dev.pkl")
+    
+    if not os.path.exists(vocab_path) or not os.path.exists(train_graph_path):
+        print(" Pre-built graph files not found!")
+        print(" For optimal performance, please run:")
+        print(f"   python build_graph.py")
+        print("   This will significantly speed up data loading!")
+        print()
+    
     train_dataset = MINDDataset(data_dir, split="train", rebuild_graph=rebuild_graph)
-    dev_dataset = MINDDataset(data_dir, split="dev", rebuild_graph=False)  # dev는 train 그래프 사용
+    dev_dataset = MINDDataset(data_dir, split="dev", rebuild_graph=False)
     
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     dev_loader = DataLoader(dev_dataset, batch_size=batch_size, shuffle=False)
