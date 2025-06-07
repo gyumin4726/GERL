@@ -1,340 +1,93 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-from .transformer import NewsTransformer
-from .graph_attention import GraphAttentionNetwork
-
+from .news_transformer import NewsTransformer
+from .graph_attention import GraphAttentionLayer
 
 class GERL(nn.Module):
-    """Graph Enhanced Representation Learning for News Recommendation"""
-    
-    def __init__(self, config, vocab=None):
+    def __init__(self, config):
         super(GERL, self).__init__()
         
-        self.config = config
-        self.vocab = vocab
-        
-        # 임베딩 레이어들
-        self.user_embedding = nn.Embedding(
-            config.num_users, config.user_embed_dim, padding_idx=0
-        )
-        self.news_embedding = nn.Embedding(
-            config.num_news, config.news_embed_dim, padding_idx=0
-        )
-        
-        # Transformer for Context Understanding (논문 Section 3.1)
-        self.news_transformer = NewsTransformer(
+        # News Encoder
+        self.news_encoder = NewsTransformer(
             vocab_size=config.vocab_size,
-            embed_dim=config.word_embed_dim,
-            num_heads=config.num_heads,
-            num_topics=config.num_topics,
-            topic_embed_dim=config.topic_embed_dim,
-            dropout=config.dropout,
-            vocab=vocab,
-            glove_path=getattr(config, 'glove_path', None)
-        )
-        
-        # 뉴스 의미 표현 차원 계산
-        self.news_semantic_dim = config.word_embed_dim + config.topic_embed_dim
-        
-        # Graph Attention Network for Two-hop Learning (논문 Section 3.3)
-        self.graph_attention = GraphAttentionNetwork(
-            user_embed_dim=config.user_embed_dim,
-            news_embed_dim=config.news_embed_dim,
-            hidden_dim=config.attention_hidden_dim,
+            d_model=config.d_model,
+            nhead=config.num_heads,
             dropout=config.dropout
         )
         
-        # One-hop Interaction Learning을 위한 어텐션 네트워크들
-        # 사용자의 클릭 뉴스 집계를 위한 어텐션 (논문 Eq. 3)
-        self.clicked_news_attention = nn.Sequential(
-            nn.Linear(self.news_semantic_dim, config.attention_hidden_dim),
-            nn.Tanh(),
-            nn.Linear(config.attention_hidden_dim, 1)
-        )
+        # User Embedding
+        self.user_embedding = nn.Embedding(1000000, config.id_dim)  # 큰 값으로 설정
         
-        # 최종 사용자 표현 차원 계산
-        self.final_user_dim = (
-            self.news_semantic_dim +  # one-hop semantic
-            config.user_embed_dim +   # one-hop ID
-            config.user_embed_dim     # two-hop graph
-        )
+        # Graph Attention Layers
+        self.user_gat = GraphAttentionLayer(config.id_dim, config.attention_dim)
+        self.news_gat = GraphAttentionLayer(config.d_model, config.attention_dim)
         
-        # 최종 뉴스 표현 차원 계산
-        self.final_news_dim = (
-            self.news_semantic_dim +  # n_t^O: semantic representation
-            config.news_embed_dim +   # n_e^O: news ID embedding
-            config.news_embed_dim +   # n_e^G: two-hop graph news ID
-            self.news_semantic_dim    # n_t^G: two-hop graph semantic
-        )
+        # Final Projection Layers
+        self.user_projection = nn.Linear(config.id_dim + config.attention_dim, config.final_dim)
+        self.news_projection = nn.Linear(config.d_model + config.attention_dim, config.final_dim)
         
+        self.final_layer = nn.Linear(config.final_dim, 1)
         self.dropout = nn.Dropout(config.dropout)
+    
+    def encode_news(self, news_title, news_neighbors=None, news_neighbor_adj=None):
+        # 뉴스 인코딩
+        news_repr = self.news_encoder(news_title)  # [batch_size, d_model]
         
-        # 논문에는 없지만 차원 맞춤을 위해 최소한 필요
-        # 더 작은 차원으로 맞춤
-        self.final_dim = min(self.final_user_dim, self.final_news_dim)
-        if self.final_user_dim != self.final_news_dim:
-            self.user_projection = nn.Linear(self.final_user_dim, self.final_dim) if self.final_user_dim > self.final_dim else nn.Identity()
-            self.news_projection = nn.Linear(self.final_news_dim, self.final_dim) if self.final_news_dim > self.final_dim else nn.Identity()
+        # 그래프 어텐션 적용 (이웃 노드가 있는 경우)
+        if news_neighbors is not None and news_neighbor_adj is not None:
+            neighbor_repr = self.news_encoder(news_neighbors)  # [batch_size, num_neighbors, d_model]
+            news_graph_repr = self.news_gat(news_repr.unsqueeze(1), neighbor_repr, news_neighbor_adj)
+            news_repr = torch.cat([news_repr, news_graph_repr.squeeze(1)], dim=-1)
         else:
-            self.user_projection = nn.Identity()
-            self.news_projection = nn.Identity()
+            # 이웃 노드가 없는 경우 zero padding
+            news_repr = torch.cat([news_repr, torch.zeros_like(news_repr)], dim=-1)
         
-    def forward(self, batch):
-        """
-        Args:
-            batch: 배치 데이터 딕셔너리
-        Returns:
-            user_repr: (batch_size, final_embed_dim) - 최종 사용자 표현
-            news_repr: (batch_size, final_embed_dim) - 최종 뉴스 표현
-        """
-        
-        # One-hop Interaction Learning (논문 Section 3.2)
-        user_one_hop = self._one_hop_user_learning(batch)
-        news_one_hop = self._one_hop_news_learning(batch)
-        
-        # Two-hop Graph Learning (논문 Section 3.3)
-        user_two_hop = self._two_hop_user_learning(batch)
-        news_two_hop = self._two_hop_news_learning(batch)
-        
-        # 표현들을 연결하여 최종 표현 생성 (논문 Section 3.4)
-        user_repr = torch.cat([
-            user_one_hop['semantic'],  # u_t^O
-            user_one_hop['id'],        # u_e^O  
-            user_two_hop               # u_e^G
-        ], dim=-1)
-        
-        news_repr = torch.cat([
-            news_one_hop['semantic'],  # n_t^O
-            news_one_hop['id'],        # n_e^O
-            news_two_hop['id'],        # n_e^G (논문과 일치하도록 추가)
-            news_two_hop['semantic']   # n_t^G
-        ], dim=-1)
-        
-        # 차원 맞춤 (논문에는 없지만 구현상 필요)
-        user_repr = self.user_projection(user_repr)
         news_repr = self.news_projection(news_repr)
-        
-        return user_repr, news_repr
+        return news_repr
     
-    def _one_hop_user_learning(self, batch):
-        """One-hop 사용자 학습 (논문 Section 3.2.2, 3.2.3)"""
+    def encode_user(self, user_id, clicked_news_titles, user_neighbors=None, user_neighbor_adj=None):
+        # 사용자 임베딩
+        user_repr = self.user_embedding(user_id)  # [batch_size, id_dim]
         
-        # Target User Semantic Representations (논문 Section 3.2.2)
-        clicked_news_tokens = batch['clicked_news_title']  # (batch_size, max_clicked, max_title_len)
-        clicked_news_topics = batch['clicked_news_topic']  # (batch_size, max_clicked)
-        clicked_mask = batch['clicked_mask']  # (batch_size, max_clicked)
+        # 클릭한 뉴스 인코딩
+        batch_size, history_len, title_len = clicked_news_titles.shape
+        clicked_news = clicked_news_titles.view(-1, title_len)  # [batch_size * history_len, title_len]
+        clicked_news_repr = self.news_encoder(clicked_news)  # [batch_size * history_len, d_model]
+        clicked_news_repr = clicked_news_repr.view(batch_size, history_len, -1)  # [batch_size, history_len, d_model]
         
-        batch_size, max_clicked, max_title_len = clicked_news_tokens.shape
+        # 클릭 히스토리의 평균으로 사용자 표현 보강
+        history_repr = torch.mean(clicked_news_repr, dim=1)  # [batch_size, d_model]
+        user_repr = user_repr + history_repr  # Simple addition for now
         
-        # 클릭한 뉴스들의 의미 표현 계산
-        clicked_news_tokens_flat = clicked_news_tokens.view(-1, max_title_len)
-        clicked_news_topics_flat = clicked_news_topics.view(-1)
-        
-        # 마스크가 True인 뉴스들만 처리
-        valid_indices = clicked_mask.view(-1)
-        
-        if valid_indices.sum() > 0:
-            valid_tokens = clicked_news_tokens_flat[valid_indices]
-            valid_topics = clicked_news_topics_flat[valid_indices]
-            
-            # Transformer로 뉴스 표현 계산
-            valid_news_reprs = self.news_transformer(valid_tokens, valid_topics)
-            
-            # 원래 shape으로 복원
-            clicked_news_reprs = torch.zeros(
-                batch_size * max_clicked, self.news_semantic_dim,
-                device=clicked_news_tokens.device
-            )
-            clicked_news_reprs[valid_indices] = valid_news_reprs
-            clicked_news_reprs = clicked_news_reprs.view(
-                batch_size, max_clicked, self.news_semantic_dim
-            )
+        # 그래프 어텐션 적용 (이웃 노드가 있는 경우)
+        if user_neighbors is not None and user_neighbor_adj is not None:
+            neighbor_repr = self.user_embedding(user_neighbors)  # [batch_size, num_neighbors, id_dim]
+            user_graph_repr = self.user_gat(user_repr.unsqueeze(1), neighbor_repr, user_neighbor_adj)
+            user_repr = torch.cat([user_repr, user_graph_repr.squeeze(1)], dim=-1)
         else:
-            clicked_news_reprs = torch.zeros(
-                batch_size, max_clicked, self.news_semantic_dim,
-                device=clicked_news_tokens.device
-            )
+            # 이웃 노드가 없는 경우 zero padding
+            user_repr = torch.cat([user_repr, torch.zeros_like(user_repr)], dim=-1)
         
-        # Attentive aggregation (논문 Eq. 3)
-        attention_logits = self.clicked_news_attention(clicked_news_reprs).squeeze(-1)  # (batch_size, max_clicked)
-        attention_logits = attention_logits.masked_fill(~clicked_mask, float('-inf'))
-        attention_weights = F.softmax(attention_logits, dim=-1)  # (batch_size, max_clicked)
-        
-        user_semantic = torch.sum(
-            clicked_news_reprs * attention_weights.unsqueeze(-1), dim=1
-        )  # (batch_size, news_semantic_dim)
-        
-        # Target User ID Representations (논문 Section 3.2.3)
-        user_ids = batch['user_id']  # (batch_size,)
-        user_id_repr = self.user_embedding(user_ids)  # (batch_size, user_embed_dim)
-        
-        return {
-            'semantic': user_semantic,
-            'id': user_id_repr
-        }
+        user_repr = self.user_projection(user_repr)
+        return user_repr
     
-    def _one_hop_news_learning(self, batch):
-        """One-hop 뉴스 학습 (논문 Section 3.2.1)"""
-        
-        # Candidate News Semantic Representations
-        candidate_news_tokens = batch['candidate_news_title']  # (batch_size, max_title_len)
-        candidate_news_topics = batch['candidate_news_topic']  # (batch_size,)
-        candidate_news_ids = batch['candidate_news_id']  # (batch_size,)
-        
-        # Transformer로 의미 표현 계산
-        news_semantic = self.news_transformer(candidate_news_tokens, candidate_news_topics)
-        
-        # 뉴스 ID 임베딩
-        news_id_repr = self.news_embedding(candidate_news_ids)
-        
-        return {
-            'semantic': news_semantic,
-            'id': news_id_repr
-        }
-    
-    def _two_hop_user_learning(self, batch):
-        """Two-hop 사용자 학습 (논문 Section 3.3.1)"""
-        
-        neighbor_user_ids = batch['neighbor_users']  # (batch_size, max_neighbors)
-        neighbor_user_mask = batch['neighbor_user_mask']  # (batch_size, max_neighbors)
-        
-        # 이웃 사용자 임베딩
-        neighbor_user_embeds = self.user_embedding(neighbor_user_ids)
-        
-        # 사용자 이웃 정보만 집계
-        aggregated_users = self.graph_attention.neighbor_user_aggregator(
-            neighbor_user_embeds, neighbor_user_mask
+    def forward(self, batch):
+        # 뉴스 인코딩
+        news_repr = self.encode_news(
+            batch['news_title'],
+            batch.get('news_neighbors', None),
+            batch.get('news_neighbor_adj', None)
         )
         
-        return aggregated_users
-    
-    def _two_hop_news_learning(self, batch):
-        """Two-hop 뉴스 학습 (논문 Section 3.3.2, 3.3.3)"""
-        
-        neighbor_news_ids = batch['neighbor_news']  # (batch_size, max_neighbors)
-        neighbor_news_mask = batch['neighbor_news_mask']  # (batch_size, max_neighbors)
-        
-        # 이웃 뉴스들의 의미 표현 계산
-        neighbor_news_tokens = batch['neighbor_news_title']  # (batch_size, max_neighbors, max_title_len)
-        neighbor_news_topics = batch['neighbor_news_topic']  # (batch_size, max_neighbors)
-        
-        batch_size, max_neighbors, max_title_len = neighbor_news_tokens.shape
-        
-        # Flatten and process
-        neighbor_tokens_flat = neighbor_news_tokens.view(-1, max_title_len)
-        neighbor_topics_flat = neighbor_news_topics.view(-1)
-        valid_indices = neighbor_news_mask.view(-1)
-        
-        if valid_indices.sum() > 0:
-            valid_tokens = neighbor_tokens_flat[valid_indices]
-            valid_topics = neighbor_topics_flat[valid_indices]
-            
-            valid_news_semantic = self.news_transformer(valid_tokens, valid_topics)
-            
-            neighbor_news_semantic = torch.zeros(
-                batch_size * max_neighbors, self.news_semantic_dim,
-                device=neighbor_news_tokens.device
-            )
-            neighbor_news_semantic[valid_indices] = valid_news_semantic
-            neighbor_news_semantic = neighbor_news_semantic.view(
-                batch_size, max_neighbors, self.news_semantic_dim
-            )
-        else:
-            neighbor_news_semantic = torch.zeros(
-                batch_size, max_neighbors, self.news_semantic_dim,
-                device=neighbor_news_tokens.device
-            )
-        
-        # 이웃 뉴스 ID 임베딩
-        neighbor_news_id_embeds = self.news_embedding(neighbor_news_ids)
-        
-        # 뉴스 이웃 정보들을 각각 집계
-        aggregated_news_ids = self.graph_attention.neighbor_news_id_aggregator(
-            neighbor_news_id_embeds, neighbor_news_mask
+        # 사용자 인코딩
+        user_repr = self.encode_user(
+            batch['user_id'],
+            batch['clicked_news_titles'],
+            batch.get('user_neighbors', None),
+            batch.get('user_neighbor_adj', None)
         )
         
-        aggregated_news_semantic = self.graph_attention.neighbor_news_semantic_aggregator(
-            neighbor_news_semantic, neighbor_news_mask
-        )
-        
-        return {
-            'id': aggregated_news_ids,
-            'semantic': aggregated_news_semantic
-        }
-    
-    def predict(self, user_repr, news_repr):
-        """예측 점수 계산 (논문 Section 3.4)"""
-        scores = torch.sum(user_repr * news_repr, dim=-1)  # (batch_size,)
-        return scores
-    
-    def compute_loss(self, batch, negative_samples=None):
-        """손실 함수 계산 (논문 Eq. 5)"""
-        
-        user_repr, news_repr = self.forward(batch)
-        
-        # 긍정 샘플 점수
-        pos_scores = self.predict(user_repr, news_repr)  # (batch_size,)
-        
-        # 논문 Eq.(5): L = -Σ_i log(exp(ŷ_i^+) / (exp(ŷ_i^+) + Σ_j exp(ŷ_{i,j}^-)))
-        # λ=4 negative sampling (논문 설정)
-        batch_size = user_repr.size(0)
-        
-        if negative_samples is not None:
-            # 명시적 negative samples가 제공된 경우
-            neg_user_repr = user_repr.unsqueeze(1).expand(-1, negative_samples.size(1), -1)
-            neg_scores = torch.sum(neg_user_repr * negative_samples, dim=-1)
-        else:
-            # In-batch negative sampling 개선
-            # 각 사용자에 대해 배치 내 다른 모든 뉴스를 negative로 사용
-            all_news_repr = news_repr  # (batch_size, embed_dim)
-            
-            # 사용자 표현과 모든 뉴스 표현 간의 점수 계산
-            scores_matrix = torch.matmul(user_repr, all_news_repr.transpose(0, 1))  # (batch_size, batch_size)
-            
-            # 대각선(자기 자신) 제외하고 negative scores 추출
-            neg_scores_list = []
-            for i in range(batch_size):
-                # i번째 사용자의 negative scores (자기 자신 제외)
-                neg_scores_i = torch.cat([scores_matrix[i, :i], scores_matrix[i, i+1:]])
-                
-                # λ=4개만 랜덤 샘플링 (논문 설정)
-                if len(neg_scores_i) > self.config.negative_sampling_ratio:
-                    indices = torch.randperm(len(neg_scores_i))[:self.config.negative_sampling_ratio]
-                    neg_scores_i = neg_scores_i[indices]
-                
-                neg_scores_list.append(neg_scores_i)
-            
-            # 패딩하여 동일한 크기로 맞춤
-            max_neg_len = max(len(scores) for scores in neg_scores_list)
-            neg_scores = torch.zeros(batch_size, max_neg_len, device=user_repr.device)
-            
-            for i, scores in enumerate(neg_scores_list):
-                if len(scores) > 0:
-                    neg_scores[i, :len(scores)] = scores
-                    # 나머지는 매우 작은 값으로 채움
-                    if len(scores) < max_neg_len:
-                        neg_scores[i, len(scores):] = float('-inf')
-        
-        # 논문 Eq.(5) 구현
-        pos_exp = torch.exp(pos_scores)  # (batch_size,)
-        
-        # negative scores에서 -inf 마스킹 처리
-        neg_scores_masked = neg_scores.clone()
-        neg_scores_masked[torch.isinf(neg_scores_masked)] = -1e8  # -inf를 큰 음수로 교체
-        neg_exp = torch.exp(neg_scores_masked)  # (batch_size, num_neg)
-        neg_sum = torch.sum(neg_exp, dim=-1)  # (batch_size,)
-        
-        # Numerical stability를 위한 처리
-        epsilon = 1e-8
-        denominator = pos_exp + neg_sum + epsilon
-        
-        # log-likelihood 최대화 = negative log-likelihood 최소화
-        loss = -torch.log(pos_exp / denominator)
-        
-        # NaN이나 inf 값 확인 및 처리
-        loss = torch.where(torch.isnan(loss) | torch.isinf(loss), 
-                          torch.zeros_like(loss), loss)
-        
-        return loss.mean() 
+        # 최종 예측
+        logits = self.final_layer(self.dropout(news_repr * user_repr)).squeeze(-1)
+        return logits 
