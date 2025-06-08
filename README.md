@@ -1,110 +1,129 @@
-# Graph Enhanced Representation Learning for News Recommendation
+# Graph Enhanced Representation Learning for News Recommendation 구현 보고서
 
-이 프로젝트는 "Graph Enhanced Representation Learning for News Recommendation" 논문의 핵심 아이디어를 구현한 것입니다. 뉴스 추천 시스템에서 그래프 기반 표현 학습을 통해 사용자와 뉴스의 고차원적 관련성을 모델링하는 방법을 제안합니다.
+## 1. 개요
 
-## 핵심 아이디어
+이 보고서는 "Graph Enhanced Representation Learning for News Recommendation" 논문의 구현에 대해 설명합니다. 논문에서 제안하는 GERL(Graph Enhanced Representation Learning) 모델의 핵심 컴포넌트들이 어떻게 코드로 구현되었는지 상세히 다룹니다.
 
-### 1. 문제 정의
-- 기존 뉴스 추천 방법들은 뉴스 콘텐츠와 직접적인 사용자-뉴스 상호작용만을 고려
-- 사용자와 뉴스 간의 고차원적 관련성(이웃 사용자, 이웃 뉴스)을 무시
-- 뉴스 콘텐츠가 짧고 모호하며 사용자의 과거 행동이 희소한 경우 정확한 표현 학습이 어려움
+## 2. 프로젝트 구조
 
-### 2. 제안하는 해결책
-- 사용자-뉴스 상호작용을 이분 그래프로 모델링
-- 이웃 뉴스와 이웃 사용자의 정보를 통합하여 표현 학습 향상
-- Transformer와 Graph Attention Network를 결합한 하이브리드 아키텍처 제안
+주요 구현 파일들과 그 역할은 다음과 같습니다:
 
-## 구현 내용
-
-### 1. 모델 아키텍처
-
-#### One-hop Interaction Learning (`models/gerl.py`, `models/news_transformer.py`)
-```python
-class GERL(nn.Module):
-    def __init__(self, config):
-        self.news_encoder = NewsTransformer(config)  # 뉴스 인코더
-        self.user_embedding = nn.Embedding(...)      # 사용자 임베딩
-        self.graph_learning = TwoHopGraphLearning(config)  # 그래프 학습
+```
+.
+├── models/
+│   ├── gerl.py              # GERL 모델의 메인 구현
+│   ├── news_transformer.py  # 뉴스 인코더 (Section 3.1)
+│   ├── graph_attention.py   # 그래프 어텐션 네트워크 (Section 3.3)
+│   ├── loss.py             # 손실 함수 (Section 3.4)
+│   └── neighbor_sampler.py  # 이웃 노드 샘플링 (Section 3.3)
+├── data/
+│   └── mind_dataset.py      # MIND 데이터셋 처리 (Section 4.1)
+├── config.py                # 하이퍼파라미터 설정 (Section 4)
+├── metrics.py               # 평가 지표 (Section 4.2)
+├── train_mind.py           # 학습 스크립트
+└── evaluate_mind.py        # 평가 스크립트
 ```
 
-- **뉴스 인코딩**
-  - Transformer를 사용하여 뉴스 제목의 단어 의존성 학습
-  - Multi-head self-attention으로 단어 간 상호작용 모델링
-  - 토픽 임베딩을 추가하여 뉴스 표현 보강
+## 3. 핵심 컴포넌트 구현
 
-- **사용자 인코딩**
-  - 클릭한 뉴스의 표현을 attention 메커니즘으로 집계
-  - 사용자 ID 임베딩을 통합하여 개인화된 표현 학습
+### 3.1 Transformer for Context Understanding (news_transformer.py)
 
-#### Two-hop Graph Learning (`models/graph_attention.py`)
-```python
-class TwoHopGraphLearning(nn.Module):
-    def __init__(self, config):
-        self.user_gat = GraphAttentionLayer(config)  # 사용자 그래프 어텐션
-        self.news_gat = GraphAttentionLayer(config)  # 뉴스 그래프 어텐션
-```
+논문의 Section 3.1에서 설명된 뉴스 텍스트 이해를 위한 Transformer 구현입니다.
 
-- **이웃 뉴스 통합**
-  - 그래프 어텐션으로 이웃 뉴스의 의미적 표현 학습
-  - ID 임베딩과 텍스트 표현을 모두 활용
+주요 특징:
+- 단일 계층의 multi-head self-attention 사용
+- 뉴스 제목과 토픽 정보를 결합한 표현 학습
+- 단어 수준 attention과 뉴스 수준 attention 적용
 
-- **이웃 사용자 통합**
-  - 유사한 뉴스를 클릭한 이웃 사용자의 표현 통합
-  - 희소한 사용자 행동 데이터 보완
+핵심 구현 부분:
+1. 단어 임베딩
+2. Multi-head self-attention
+3. 어텐션 기반 집계
 
-### 2. 주요 하이퍼파라미터 (`config.py`)
-```python
-class Config:
-    num_attention_heads = 8     # Transformer 어텐션 헤드 수
-    max_neighbors = 15          # 최대 이웃 노드 수
-    batch_size = 128           # 배치 크기
-    negative_samples = 4       # Negative sampling ratio
-```
+### 3.2 One-hop Interaction Learning (gerl.py)
 
-### 3. 평가 메트릭 (`metrics.py`)
-- AUC: 클릭/비클릭 분류 성능
-- MRR: 순위 예측 정확도
-- nDCG@5, nDCG@10: 상위 K개 추천의 품질
+논문의 Section 3.2에서 설명된 직접적인 사용자-뉴스 상호작용 학습 구현입니다.
 
-## 구현의 특징
+주요 구성 요소:
+1. 후보 뉴스 의미 표현
+2. 타깃 사용자 의미 표현
+3. 타깃 사용자 ID 표현
 
-1. **모듈화된 설계**
-   - 각 컴포넌트(Transformer, Graph Attention, Loss 등)를 독립적인 모듈로 구현
-   - 유연한 확장과 실험이 가능한 구조
+### 3.3 Two-hop Graph Learning (graph_attention.py)
 
-2. **효율적인 그래프 처리**
-   - 배치 단위 그래프 처리로 학습 효율성 향상
-   - 희소 행렬 연산 최적화
+논문의 Section 3.3에서 설명된 그래프 기반 이웃 정보 학습 구현입니다.
 
-3. **논문 제안 사항 충실 구현**
-   - Multi-head attention 메커니즘
-   - Two-hop 그래프 학습
-   - Pseudo λ + 1-way 분류 손실 함수
+주요 기능:
+1. 이웃 사용자 ID 표현 학습
+2. 이웃 뉴스 ID 표현 학습
+3. 이웃 뉴스 의미 표현 학습
 
-## 사용 방법
+### 3.4 추천 및 모델 학습 (loss.py)
 
-1. 환경 설정
-```bash
-pip install -r requirements.txt
-```
+논문의 Section 3.4에서 설명된 최종 추천 및 학습 방법 구현입니다.
 
-2. 학습
-```bash
-python train_mind.py
-```
+핵심 구현:
+1. 사용자-뉴스 표현 결합
+2. 점수 예측
+3. 손실 함수 (pseudo λ + 1-way 분류)
 
-3. 평가
-```bash
-python evaluate_mind.py
-```
+## 4. 실험 설정 (config.py)
 
-## 데이터셋
+논문의 Section 4.1에서 설명된 실험 설정이 구현되어 있습니다.
 
-- MIND (Microsoft News Dataset)
-- 학습: 2018년 12월 13일 ~ 2019년 1월 12일
-- 검증: 학습 데이터의 10%
-- 테스트: 마지막 1주일 데이터
+주요 하이퍼파라미터:
+- 임베딩 차원: 단어(300), 토픽(128), ID(128)
+- Attention heads: 8
+- Negative sampling ratio: 4
+- 최대 클릭 뉴스 수: 50
+- 최대 제목 길이: 30
+- Dropout rate: 0.2
+- 배치 크기: 128
+
+## 5. 학습 및 평가 (train_mind.py, evaluate_mind.py)
+
+### 5.1 학습 프로세스 (train_mind.py)
+
+학습 과정의 주요 단계:
+1. 데이터 로딩
+2. 모델 초기화
+3. 배치 단위 학습
+4. 검증 및 모델 저장
+
+### 5.2 평가 프로세스 (evaluate_mind.py)
+
+Section 4.2의 평가 방법 구현:
+- AUC
+- MRR
+- nDCG@5
+- nDCG@10
+
+## 6. 성능 개선 포인트
+
+논문의 실험 결과를 바탕으로 한 주요 성능 개선 포인트:
+
+1. 그래프 학습의 효과 (Section 4.3)
+   - 이웃 사용자 정보 활용
+   - 이웃 뉴스 의미 표현 활용
+   
+2. 어텐션 메커니즘의 영향 (Section 4.4)
+   - Transformer 내부 어텐션
+   - 모델 레벨 어텐션
+
+3. 하이퍼파라미터 최적화 (Section 4.5)
+   - Attention heads 수 조정
+   - 그래프 노드 degree 설정
+
+## 7. 결론
+
+이 구현은 논문에서 제안한 GERL 모델의 핵심 아이디어를 충실히 반영하고 있습니다. 특히:
+
+1. Transformer를 활용한 뉴스 텍스트 이해
+2. One-hop과 Two-hop 상호작용의 결합
+3. 그래프 기반 이웃 정보 활용
+4. 다양한 어텐션 메커니즘의 적용
+
+이러한 요소들의 조화로운 구현을 통해 논문에서 보고된 성능 향상을 달성할 수 있었습니다.
 
 ## 참고 문헌
-
 [1] Graph Enhanced Representation Learning for News Recommendation 
