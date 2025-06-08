@@ -1,3 +1,8 @@
+"""
+Section 4.1 "Implementation Details"에서 설명된
+MIND 데이터셋에서의 모델 학습
+"""
+
 import torch
 from torch.utils.data import DataLoader
 from config import Config
@@ -14,6 +19,10 @@ from datetime import datetime, timedelta
 import logging
 
 def setup_logging():
+    """
+    로깅 설정을 초기화합니다.
+    파일과 콘솔 출력을 모두 설정합니다.
+    """
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(levelname)s - %(message)s',
@@ -24,6 +33,9 @@ def setup_logging():
     )
 
 def set_seed(seed):
+    """
+    재현성을 위해 모든 난수 생성기의 시드를 설정합니다.
+    """
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -33,6 +45,20 @@ def set_seed(seed):
         torch.backends.cudnn.deterministic = True
 
 def train_epoch(model, train_loader, optimizer, scheduler, device, epoch):
+    """
+    Section 4.1의 학습 설정으로 한 에포크 학습을 수행합니다.
+    - Adam 옵티마이저
+    - 선형 학습률 스케줄러
+    - Binary Cross Entropy 손실
+
+    Args:
+        model: GERL 모델
+        train_loader: 학습 데이터 로더
+        optimizer: Adam 옵티마이저
+        scheduler: 학습률 스케줄러
+        device: 학습 장치 (CPU/GPU)
+        epoch: 현재 에포크 번호
+    """
     model.train()
     total_loss = 0
     total_samples = 0
@@ -41,28 +67,28 @@ def train_epoch(model, train_loader, optimizer, scheduler, device, epoch):
     pbar = tqdm(train_loader, desc=f'Epoch {epoch}')
     
     for batch_idx, batch in enumerate(pbar):
-        # Move batch to device
+        # 배치 데이터 GPU 이동
         batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
         
-        # Forward pass
+        # 순전파
         scores = model(batch)
         labels = batch['labels']
         
-        # Calculate loss
+        # 손실 계산
         loss = torch.nn.functional.binary_cross_entropy_with_logits(scores, labels.float())
         
-        # Backward pass
+        # 역전파
         optimizer.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
         scheduler.step()
         
-        # Update statistics
+        # 통계 업데이트
         total_loss += loss.item() * len(labels)
         total_samples += len(labels)
         
-        # Update progress bar
+        # 진행 상황 표시
         avg_loss = total_loss / total_samples
         elapsed = time.time() - start_time
         speed = (batch_idx + 1) * train_loader.batch_size / elapsed
@@ -77,16 +103,24 @@ def train_epoch(model, train_loader, optimizer, scheduler, device, epoch):
     return total_loss / total_samples
 
 def evaluate(model, data_loader, device):
+    """
+    검증 데이터에서 모델을 평가합니다.
+    
+    Args:
+        model: GERL 모델
+        data_loader: 검증 데이터 로더
+        device: 평가 장치 (CPU/GPU)
+    """
     model.eval()
     all_preds = []
     all_labels = []
     
     with torch.no_grad():
-        for batch in tqdm(data_loader, desc='Evaluating'):
-            # Move batch to device
+        for batch in tqdm(data_loader, desc='평가 중'):
+            # 배치를 장치로 이동
             batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
             
-            # Forward pass
+            # 순전파
             scores = model(batch)
             preds = torch.sigmoid(scores)
             
@@ -100,15 +134,21 @@ def evaluate(model, data_loader, device):
     return metrics
 
 def main():
-    # Setup
+    """
+    Section 4.1의 실험 설정으로 모델을 학습합니다.
+    - 배치 크기: 128
+    - 최적화: Adam(lr=0.001)
+    - 조기 종료: 검증 AUC 기준
+    """
+    # 초기 설정
     setup_logging()
     config = Config()
     set_seed(42)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    logging.info(f"Using device: {device}")
+    logging.info(f"사용 장치: {device}")
     
-    # Load datasets
-    logging.info("\nLoading datasets...")
+    # 데이터셋 로드
+    logging.info("\n데이터셋 로딩 중...")
     train_dataset = MINDDataset(
         data_dir="MINDsmall_train",
         max_title_length=config.max_title_length,
@@ -121,20 +161,20 @@ def main():
         max_title_length=config.max_title_length,
         max_history_length=config.max_history_length,
         num_neighbors=config.max_neighbors,
-        tokenizer=train_dataset.tokenizer  # Reuse tokenizer
+        tokenizer=train_dataset.tokenizer  # 토크나이저 재사용
     )
     
-    # Update config with dataset statistics
+    # 데이터셋 통계로 설정 업데이트
     config.vocab_size = len(train_dataset.tokenizer)
     config.num_users = len(train_dataset.user2idx)
     config.num_news = len(train_dataset.news2idx)
     
-    logging.info(f"\nDataset statistics:")
-    logging.info(f"Train samples: {len(train_dataset)}")
-    logging.info(f"Val samples: {len(val_dataset)}")
+    logging.info(f"\n데이터셋 통계:")
+    logging.info(f"학습 샘플 수: {len(train_dataset)}")
+    logging.info(f"검증 샘플 수: {len(val_dataset)}")
     
-    # Create data loaders
-    logging.info("\nCreating data loaders...")
+    # 데이터 로더 생성
+    logging.info("\n데이터 로더 생성 중...")
     train_loader = DataLoader(
         train_dataset,
         batch_size=config.batch_size,
@@ -151,15 +191,15 @@ def main():
         pin_memory=True
     )
     
-    # Initialize model
-    logging.info("\nInitializing model...")
+    # 모델 초기화
+    logging.info("\n모델 초기화 중...")
     model = GERL(config).to(device)
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    logging.info(f"Total parameters: {total_params:,}")
-    logging.info(f"Trainable parameters: {trainable_params:,}")
+    logging.info(f"전체 파라미터: {total_params:,}")
+    logging.info(f"학습 가능 파라미터: {trainable_params:,}")
     
-    # Initialize optimizer and scheduler
+    # 옵티마이저와 스케줄러 초기화
     optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate)
     total_steps = len(train_loader) * config.num_epochs
     scheduler = get_linear_schedule_with_warmup(
@@ -168,32 +208,32 @@ def main():
         num_training_steps=total_steps
     )
     
-    # Training loop
-    logging.info("\nStarting training...")
+    # 학습 루프
+    logging.info("\n학습 시작...")
     best_metric = 0
     start_time = time.time()
     
     for epoch in range(config.num_epochs):
         epoch_start = time.time()
         
-        # Train
+        # 학습
         train_loss = train_epoch(model, train_loader, optimizer, scheduler, device, epoch + 1)
         
-        # Evaluate
-        logging.info("\nEvaluating...")
+        # 평가
+        logging.info("\n평가 중...")
         val_metrics = evaluate(model, val_loader, device)
         
-        # Log results
+        # 결과 기록
         epoch_time = time.time() - epoch_start
-        logging.info(f"\nEpoch {epoch+1}/{config.num_epochs} - Time: {timedelta(seconds=int(epoch_time))}")
-        logging.info(f"Train Loss: {train_loss:.4f}")
-        logging.info(f"Validation Metrics:")
+        logging.info(f"\n에포크 {epoch+1}/{config.num_epochs} - 소요 시간: {timedelta(seconds=int(epoch_time))}")
+        logging.info(f"학습 손실: {train_loss:.4f}")
+        logging.info(f"검증 지표:")
         logging.info(f"AUC: {val_metrics['auc']:.4f}")
         logging.info(f"MRR: {val_metrics['mrr']:.4f}")
         logging.info(f"NDCG@5: {val_metrics['ndcg5']:.4f}")
         logging.info(f"NDCG@10: {val_metrics['ndcg10']:.4f}")
         
-        # Save best model
+        # 최고 성능 모델 저장
         if val_metrics['auc'] > best_metric:
             best_metric = val_metrics['auc']
             torch.save({
@@ -204,13 +244,13 @@ def main():
                 'best_metric': best_metric,
                 'config': config.__dict__
             }, 'best_model.pth')
-            logging.info("Saved new best model!")
+            logging.info("새로운 최고 성능 모델 저장!")
         
         logging.info("-" * 50)
     
     total_time = time.time() - start_time
-    logging.info(f"\nTraining completed in {timedelta(seconds=int(total_time))}")
-    logging.info(f"Best AUC: {best_metric:.4f}")
+    logging.info(f"\n전체 학습 완료 시간: {timedelta(seconds=int(total_time))}")
+    logging.info(f"최고 AUC: {best_metric:.4f}")
 
 if __name__ == "__main__":
     main() 
