@@ -69,17 +69,17 @@ class GERL(nn.Module):
         """
         # One-hop Interaction Learning
         # 1. 후보 뉴스 의미 표현 (Transformer)
-        candidate_news_vector = self.candidate_news_semantic(
+        candidate_news_semantic = self.candidate_news_semantic(
             batch['candidate_news_word_ids'],
             batch['candidate_news_topic_ids'],
             batch.get('candidate_news_mask')
         )
         
         # 2. 사용자 ID 표현 (Embedding)
-        user_id_vector = self.user_id(batch['user_ids'])
+        user_id = self.user_id(batch['user_ids'])
         
         # 3. 사용자 의미 표현 (Transformer + Attention)
-        user_semantic_vector = self.user_semantic(
+        user_semantic = self.user_semantic(
             batch['clicked_news_word_ids'],
             batch['clicked_news_topic_ids'],
             batch.get('clicked_news_mask')
@@ -106,35 +106,35 @@ class GERL(nn.Module):
         )
         
         # 최종 표현 결합
-        # 1. 사용자 표현: [의미, ID, 이웃ID]
-        user_vector = self.user_combine(
+        # 1. 사용자 표현: [의미, ID, 이웃ID] 결합
+        user = self.user_combine(
             torch.cat([
-                user_semantic_vector,  # One-hop 의미
-                user_id_vector,       # One-hop ID
-                neighbor_user_id      # Two-hop 사용자 ID
+                user_semantic,     # One-hop: 사용자의 클릭 기반 의미 표현
+                user_id,          # One-hop: 사용자의 ID 기반 표현
+                neighbor_user_id  # Two-hop: 이웃 사용자들의 협업적 표현
             ], dim=-1)
         )
         
-        # 2. 뉴스 표현: [의미, 이웃ID, 이웃의미]
-        news_vector = self.news_combine(
+        # 2. 뉴스 표현: [의미, 이웃ID, 이웃의미] 결합
+        news = self.news_combine(
             torch.cat([
-                candidate_news_vector,  # One-hop 의미
-                neighbor_news_id,       # Two-hop 뉴스 ID
-                neighbor_news_semantic  # Two-hop 뉴스 의미
+                candidate_news_semantic,  # One-hop: 뉴스 콘텐츠 기반 의미 표현
+                neighbor_news_id,         # Two-hop: 이웃 뉴스들의 ID 기반 표현
+                neighbor_news_semantic    # Two-hop: 이웃 뉴스들의 의미적 표현
             ], dim=-1)
         )
         
         # 최종 예측 점수 계산 (내적)
-        scores = torch.sum(news_vector * user_vector, dim=-1)
+        scores = torch.sum(news * user, dim=-1)
         
         return {
             'scores': scores,
-            'user_vector': user_vector,
-            'news_vector': news_vector,
+            'user': user,
+            'news': news,
             # One-hop 표현
-            'user_semantic_vector': user_semantic_vector,
-            'user_id_vector': user_id_vector,
-            'candidate_news_vector': candidate_news_vector,
+            'user_semantic': user_semantic,
+            'user_id': user_id,
+            'candidate_news_semantic': candidate_news_semantic,
             # Two-hop 표현
             'neighbor_user_id': neighbor_user_id,
             'neighbor_news_id': neighbor_news_id,
