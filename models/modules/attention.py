@@ -49,7 +49,7 @@ class MultiHeadAttention(nn.Module):
         
         return attn_output, attn_weights
 
-class AttentiveAggregation(nn.Module):
+class AttentiveAggregator(nn.Module):
     """어텐티브 집계 레이어"""
     def __init__(self, config):
         super().__init__()
