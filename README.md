@@ -1,129 +1,107 @@
-# Graph Enhanced Representation Learning for News Recommendation 구현 보고서
+# Graph Enhanced Representation Learning (GERL) for News Recommendation
 
-## 1. 개요
+GERL은 그래프 기반의 향상된 표현 학습을 통해 뉴스 추천의 성능을 개선하는 딥러닝 모델입니다.
 
-이 보고서는 "Graph Enhanced Representation Learning for News Recommendation" 논문의 구현에 대해 설명합니다. 논문에서 제안하는 GERL(Graph Enhanced Representation Learning) 모델의 핵심 컴포넌트들이 어떻게 코드로 구현되었는지 상세히 다룹니다.
+## 모델 구조
 
-## 2. 프로젝트 구조
+### 기본 모듈 (Base Modules)
 
-주요 구현 파일들과 그 역할은 다음과 같습니다:
+모델은 다음과 같은 기본 모듈들을 활용합니다:
 
-```
-.
-├── models/
-│   ├── gerl.py              # GERL 모델의 메인 구현
-│   ├── news_transformer.py  # 뉴스 인코더 (Section 3.1)
-│   ├── graph_attention.py   # 그래프 어텐션 네트워크 (Section 3.3)
-│   ├── loss.py             # 손실 함수 (Section 3.4)
-│   └── neighbor_sampler.py  # 이웃 노드 샘플링 (Section 3.3)
-├── data/
-│   └── mind_dataset.py      # MIND 데이터셋 처리 (Section 4.1)
-├── config.py                # 하이퍼파라미터 설정 (Section 4)
-├── metrics.py               # 평가 지표 (Section 4.2)
-├── train_mind.py           # 학습 스크립트
-└── evaluate_mind.py        # 평가 스크립트
-```
+- **Transformer**: 뉴스 텍스트의 의미적 표현을 학습
+- **Embedding**: 사용자와 뉴스의 ID 기반 표현을 학습
+- **Attention**: 다양한 표현들 간의 중요도를 학습
 
-## 3. 핵심 컴포넌트 구현
+### One-hop 모듈
 
-### 3.1 Transformer for Context Understanding (news_transformer.py)
+직접적인 사용자-뉴스 상호작용을 모델링합니다:
 
-논문의 Section 3.1에서 설명된 뉴스 텍스트 이해를 위한 Transformer 구현입니다.
+1. **후보 뉴스 의미 표현** (`candidate_news_semantic.py`)
+   - Transformer 기반 표현 모듈
+   - 뉴스 제목과 본문의 의미적 특성 추출
 
-주요 특징:
-- 단일 계층의 multi-head self-attention 사용
-- 뉴스 제목과 토픽 정보를 결합한 표현 학습
-- 단어 수준 attention과 뉴스 수준 attention 적용
+2. **사용자 ID 표현** (`user_id.py`)
+   - 임베딩 기반 표현 모듈
+   - 사용자의 고유 특성 학습
 
-핵심 구현 부분:
-1. 단어 임베딩
-2. Multi-head self-attention
-3. 어텐션 기반 집계
+3. **사용자 의미 표현** (`user_semantic.py`)
+   - Transformer + Attention 기반 표현 모듈
+   - 사용자가 읽은 뉴스들의 의미적 표현을 통합
 
-### 3.2 One-hop Interaction Learning (gerl.py)
+### Two-hop 모듈
 
-논문의 Section 3.2에서 설명된 직접적인 사용자-뉴스 상호작용 학습 구현입니다.
+간접적인 사용자-뉴스 관계를 모델링합니다:
 
-주요 구성 요소:
-1. 후보 뉴스 의미 표현
-2. 타깃 사용자 의미 표현
-3. 타깃 사용자 ID 표현
+1. **이웃 뉴스 의미 표현** (`neighbor_news_semantic.py`)
+   - Transformer + Attention 기반 표현 모듈
+   - 이웃 뉴스들의 의미적 특성을 통합
 
-### 3.3 Two-hop Graph Learning (graph_attention.py)
+2. **이웃 뉴스 ID 표현** (`neighbor_news_id.py`)
+   - 임베딩 + Attention 기반 표현 모듈
+   - 이웃 뉴스들의 ID 기반 특성을 통합
 
-논문의 Section 3.3에서 설명된 그래프 기반 이웃 정보 학습 구현입니다.
+3. **이웃 사용자 ID 표현** (`neighbor_user_id.py`)
+   - 임베딩 + Attention 기반 표현 모듈
+   - 이웃 사용자들의 ID 기반 특성을 통합
 
-주요 기능:
-1. 이웃 사용자 ID 표현 학습
-2. 이웃 뉴스 ID 표현 학습
-3. 이웃 뉴스 의미 표현 학습
+### 최종 표현 (Final Representation)
 
-### 3.4 추천 및 모델 학습 (loss.py)
+각 모듈에서 생성된 표현들은 다음과 같이 통합됩니다:
 
-논문의 Section 3.4에서 설명된 최종 추천 및 학습 방법 구현입니다.
+1. **One-hop 통합**
+   - 사용자 ID 표현
+   - 사용자 의미 표현
+   - 후보 뉴스 의미 표현
 
-핵심 구현:
-1. 사용자-뉴스 표현 결합
-2. 점수 예측
-3. 손실 함수 (pseudo λ + 1-way 분류)
+2. **Two-hop 통합**
+   - 이웃 뉴스 의미 표현
+   - 이웃 뉴스 ID 표현
+   - 이웃 사용자 ID 표현
 
-## 4. 실험 설정 (config.py)
+3. **최종 예측**
+   - One-hop과 Two-hop 표현을 결합
+   - 클릭 확률 예측을 위한 다층 퍼셉트론 적용
 
-논문의 Section 4.1에서 설명된 실험 설정이 구현되어 있습니다.
+## 설정 (Configuration)
 
 주요 하이퍼파라미터:
-- 임베딩 차원: 단어(300), 토픽(128), ID(128)
-- Attention heads: 8
-- Negative sampling ratio: 4
-- 최대 클릭 뉴스 수: 50
-- 최대 제목 길이: 30
-- Dropout rate: 0.2
-- 배치 크기: 128
 
-## 5. 학습 및 평가 (train_mind.py, evaluate_mind.py)
+```python
+{
+    # 임베딩 차원
+    "word_embedding_dim": 300,    # 단어 임베딩
+    "topic_embedding_dim": 128,   # 토픽 임베딩
+    "id_embedding_dim": 128,      # ID 임베딩
 
-### 5.1 학습 프로세스 (train_mind.py)
+    # Attention 설정
+    "num_attention_heads": 8,     # 어텐션 헤드 수
+    "attention_head_size": 16,    # 어텐션 헤드 크기
 
-학습 과정의 주요 단계:
-1. 데이터 로딩
-2. 모델 초기화
-3. 배치 단위 학습
-4. 검증 및 모델 저장
+    # 시퀀스 길이 제한
+    "max_clicked_news": 50,       # 최대 클릭 뉴스 수
+    "max_title_length": 30,       # 최대 제목 길이
 
-### 5.2 평가 프로세스 (evaluate_mind.py)
+    # 학습 설정
+    "negative_sample_ratio": 4    # 부정 샘플링 비율
+}
+```
 
-Section 4.2의 평가 방법 구현:
-- AUC
-- MRR
-- nDCG@5
-- nDCG@10
+## 평가 지표
 
-## 6. 성능 개선 포인트
+모델의 성능은 다음 지표들로 평가됩니다:
+- AUC (Area Under the ROC Curve)
+- MRR (Mean Reciprocal Rank)
+- nDCG@5, nDCG@10 (Normalized Discounted Cumulative Gain)
 
-논문의 실험 결과를 바탕으로 한 주요 성능 개선 포인트:
+## 손실 함수
 
-1. 그래프 학습의 효과 (Section 4.3)
-   - 이웃 사용자 정보 활용
-   - 이웃 뉴스 의미 표현 활용
-   
-2. 어텐션 메커니즘의 영향 (Section 4.4)
-   - Transformer 내부 어텐션
-   - 모델 레벨 어텐션
+모델은 논문의 Equation (5)에 따른 대조 손실 함수를 사용합니다:
+```
+L = -∑ log(exp(y_i+) / (exp(y_i+) + ∑exp(y_i,j-)))
+```
+여기서:
+- y_i+: 긍정(클릭) 샘플의 예측 점수
+- y_i,j-: 부정(비클릭) 샘플들의 예측 점수
+- ∑: 배치 내 모든 샘플에 대한 합계
 
-3. 하이퍼파라미터 최적화 (Section 4.5)
-   - Attention heads 수 조정
-   - 그래프 노드 degree 설정
-
-## 7. 결론
-
-이 구현은 논문에서 제안한 GERL 모델의 핵심 아이디어를 충실히 반영하고 있습니다. 특히:
-
-1. Transformer를 활용한 뉴스 텍스트 이해
-2. One-hop과 Two-hop 상호작용의 결합
-3. 그래프 기반 이웃 정보 활용
-4. 다양한 어텐션 메커니즘의 적용
-
-이러한 요소들의 조화로운 구현을 통해 논문에서 보고된 성능 향상을 달성할 수 있었습니다.
-
-## 참고 문헌
-[1] Graph Enhanced Representation Learning for News Recommendation 
+이 손실 함수는 클릭된 뉴스(긍정 샘플)와 클릭되지 않은 뉴스(부정 샘플) 간의 점수 차이를 최대화하도록 학습을 유도합니다. 
