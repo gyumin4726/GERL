@@ -173,6 +173,7 @@ poetry.toml
 # LSP config files
 pyrightconfig.json
 
-.gitignore
+data/MINDsmall_train/
+data/MINDsmall_dev/
 
 # End of https://www.toptal.com/developers/gitignore/api/python

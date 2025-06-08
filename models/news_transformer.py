@@ -1,53 +1,101 @@
 import torch
 import torch.nn as nn
-from torch.nn import TransformerEncoder, TransformerEncoderLayer
+import torch.nn.functional as F
+import math
 
 class NewsTransformer(nn.Module):
-    def __init__(self, vocab_size, d_model, nhead, dropout=0.1):
-        super(NewsTransformer, self).__init__()
+    def __init__(self, config):
+        """Initialize news transformer
         
-        self.embedding = nn.Embedding(vocab_size, d_model)
-        self.pos_encoder = PositionalEncoding(d_model, dropout)
+        Args:
+            config: Model configuration containing:
+                - hidden_size: Word embedding dimension
+                - num_attention_heads: Number of attention heads
+                - head_dim: Dimension of each attention head
+                - attention_dropout: Dropout rate for attention
+                - hidden_dropout: Dropout rate for hidden states
+                - topic_dim: Topic embedding dimension
+        """
+        super().__init__()
         
-        encoder_layers = TransformerEncoderLayer(
-            d_model=d_model,
-            nhead=nhead,
-            dim_feedforward=d_model * 4,
-            dropout=dropout,
-            batch_first=True
+        # Word embedding
+        self.word_embedding = nn.Embedding(config.vocab_size, config.hidden_size)
+        
+        # Topic embedding
+        self.topic_embedding = nn.Embedding(config.num_topics, config.topic_dim)
+        
+        # Multi-head self-attention
+        self.num_heads = config.num_attention_heads
+        self.head_dim = config.head_dim
+        self.hidden_size = config.hidden_size
+        
+        self.query = nn.Linear(config.hidden_size, config.hidden_size)
+        self.key = nn.Linear(config.hidden_size, config.hidden_size)
+        self.value = nn.Linear(config.hidden_size, config.hidden_size)
+        
+        self.attention_dropout = nn.Dropout(config.attention_dropout)
+        self.hidden_dropout = nn.Dropout(config.hidden_dropout)
+        
+        # Word-level attention
+        self.word_attention = nn.Sequential(
+            nn.Linear(config.hidden_size, config.attention_dim),
+            nn.Tanh(),
+            nn.Linear(config.attention_dim, 1)
         )
-        self.transformer_encoder = TransformerEncoder(encoder_layers, num_layers=2)
         
-        self.dropout = nn.Dropout(dropout)
+    def transpose_for_scores(self, x):
+        """Transpose and reshape tensor for attention computation"""
+        batch_size = x.size(0)
+        seq_length = x.size(1)
+        x = x.view(batch_size, seq_length, self.num_heads, self.head_dim)
+        return x.permute(0, 2, 1, 3)
         
-    def forward(self, src):
-        # src: [batch_size, seq_len]
+    def forward(self, input_ids, topic_ids=None, attention_mask=None):
+        """Forward pass
         
-        # Embedding + Positional Encoding
-        src = self.embedding(src) * (src.size(-1) ** 0.5)  # [batch_size, seq_len, d_model]
-        src = self.pos_encoder(src)
+        Args:
+            input_ids: Input token IDs [batch_size, seq_length]
+            topic_ids: Topic IDs [batch_size]
+            attention_mask: Attention mask [batch_size, seq_length]
+            
+        Returns:
+            news_vector: News representation vector [batch_size, hidden_size + topic_dim]
+        """
+        # Word embeddings
+        word_embeds = self.word_embedding(input_ids)  # [batch_size, seq_length, hidden_size]
+        word_embeds = self.hidden_dropout(word_embeds)
         
-        # Transformer Encoding
-        output = self.transformer_encoder(src)  # [batch_size, seq_len, d_model]
+        # Multi-head self-attention
+        # Compute query, key, value projections
+        query = self.transpose_for_scores(self.query(word_embeds))
+        key = self.transpose_for_scores(self.key(word_embeds))
+        value = self.transpose_for_scores(self.value(word_embeds))
         
-        # Pool the output (mean pooling)
-        output = output.mean(dim=1)  # [batch_size, d_model]
+        # Compute attention scores
+        attention_scores = torch.matmul(query, key.transpose(-1, -2))
+        attention_scores = attention_scores / math.sqrt(self.head_dim)
         
-        return output
-
-class PositionalEncoding(nn.Module):
-    def __init__(self, d_model, dropout=0.1, max_len=5000):
-        super(PositionalEncoding, self).__init__()
-        self.dropout = nn.Dropout(p=dropout)
-
-        pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-torch.log(torch.tensor(10000.0)) / d_model))
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0)
-        self.register_buffer('pe', pe)
-
-    def forward(self, x):
-        x = x + self.pe[:, :x.size(1)]
-        return self.dropout(x) 
+        if attention_mask is not None:
+            attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)
+            attention_scores = attention_scores.masked_fill(attention_mask == 0, -1e9)
+        
+        # Normalize attention scores
+        attention_probs = F.softmax(attention_scores, dim=-1)
+        attention_probs = self.attention_dropout(attention_probs)
+        
+        # Apply attention to values
+        context = torch.matmul(attention_probs, value)
+        context = context.permute(0, 2, 1, 3).contiguous()
+        context = context.view(context.size(0), -1, self.hidden_size)
+        
+        # Word-level attention for news representation
+        word_attention = self.word_attention(context)  # [batch_size, seq_length, 1]
+        word_attention = F.softmax(word_attention, dim=1)
+        news_vector = torch.sum(word_attention * context, dim=1)  # [batch_size, hidden_size]
+        
+        # Add topic embeddings if provided
+        if topic_ids is not None:
+            topic_embeds = self.topic_embedding(topic_ids)  # [batch_size, topic_dim]
+            news_vector = torch.cat([news_vector, topic_embeds], dim=-1)
+        
+        return news_vector 

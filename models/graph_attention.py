@@ -3,49 +3,126 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class GraphAttentionLayer(nn.Module):
-    def __init__(self, in_features, out_features, dropout=0.1, alpha=0.2):
-        super(GraphAttentionLayer, self).__init__()
-        self.in_features = in_features
-        self.out_features = out_features
-        self.dropout = dropout
-        self.alpha = alpha
+    def __init__(self, config):
+        """Initialize graph attention layer
         
-        # 변환 행렬
-        self.W = nn.Linear(in_features, out_features, bias=False)
-        
-        # 어텐션 메커니즘
-        self.a = nn.Linear(2 * out_features, 1, bias=False)
-        
-        # LeakyReLU
-        self.leakyrelu = nn.LeakyReLU(self.alpha)
-    
-    def forward(self, node, neighbors, adj):
+        Args:
+            config: Model configuration containing:
+                - hidden_size: Hidden dimension size
+                - graph_hidden_size: Graph attention hidden size
+                - graph_attention_heads: Number of attention heads
+                - graph_dropout: Dropout rate
         """
-        node: [batch_size, 1, in_features]
-        neighbors: [batch_size, num_neighbors, in_features]
-        adj: [batch_size, num_neighbors, num_neighbors]
+        super().__init__()
+        self.hidden_size = config.hidden_size
+        self.graph_hidden_size = config.graph_hidden_size
+        self.num_heads = config.graph_attention_heads
+        self.head_dim = config.graph_hidden_size // config.graph_attention_heads
+        self.dropout = config.graph_dropout
+        
+        # Transformations for node features
+        self.W = nn.Linear(config.hidden_size, config.graph_hidden_size * config.graph_attention_heads, bias=False)
+        
+        # Attention mechanism
+        self.a = nn.Parameter(torch.zeros(size=(2 * self.head_dim, 1)))
+        nn.init.xavier_uniform_(self.a.data)
+        
+        self.leakyrelu = nn.LeakyReLU(0.2)
+        self.dropout_layer = nn.Dropout(self.dropout)
+        
+    def forward(self, node_features, adj_matrix=None):
+        """Forward pass
+        
+        Args:
+            node_features: Input node features [batch_size, num_nodes, hidden_size]
+            adj_matrix: Adjacency matrix [batch_size, num_nodes, num_nodes]
+            
+        Returns:
+            output: Updated node features [batch_size, num_nodes, graph_hidden_size]
         """
-        batch_size = node.size(0)
-        num_neighbors = neighbors.size(1)
+        batch_size, num_nodes = node_features.size(0), node_features.size(1)
         
-        # 선형 변환
-        Wh = self.W(torch.cat([node, neighbors], dim=1))  # [batch_size, 1+num_neighbors, out_features]
+        # Linear transformation and reshape for multi-head attention
+        Wh = self.W(node_features)  # [batch_size, num_nodes, num_heads * head_dim]
+        Wh = Wh.view(batch_size, num_nodes, self.num_heads, self.head_dim)
         
-        # 어텐션 계산
-        a_input = torch.cat([
-            Wh[:, :1].repeat(1, num_neighbors, 1),  # [batch_size, num_neighbors, out_features]
-            Wh[:, 1:]  # [batch_size, num_neighbors, out_features]
-        ], dim=2)  # [batch_size, num_neighbors, 2*out_features]
+        # Self-attention on the nodes
+        # Prepare for attention
+        Wh1 = Wh.unsqueeze(3)  # [batch_size, num_nodes, num_heads, 1, head_dim]
+        Wh2 = Wh.unsqueeze(2)  # [batch_size, num_nodes, 1, num_heads, head_dim]
         
-        e = self.leakyrelu(self.a(a_input))  # [batch_size, num_neighbors, 1]
+        # Attention scores
+        # [batch_size, num_nodes, num_nodes, num_heads]
+        attention = self.leakyrelu(torch.matmul(
+            torch.cat([Wh1.expand(-1, -1, -1, num_nodes, -1), 
+                      Wh2.expand(-1, -1, num_nodes, -1, -1)], dim=-1),
+            self.a.unsqueeze(0).unsqueeze(0).unsqueeze(0)
+        )).squeeze(-1)
         
-        # Masked Attention
-        zero_vec = -9e15 * torch.ones_like(e)
-        attention = torch.where(adj > 0, e, zero_vec)
-        attention = F.softmax(attention, dim=1)
-        attention = F.dropout(attention, self.dropout, training=self.training)
+        # Mask attention scores using adjacency matrix if provided
+        if adj_matrix is not None:
+            adj_matrix = adj_matrix.unsqueeze(3).expand(-1, -1, -1, self.num_heads)
+            attention = attention.masked_fill(adj_matrix == 0, float('-inf'))
         
-        # 최종 출력
-        h_prime = torch.bmm(attention.transpose(1, 2), Wh[:, 1:])  # [batch_size, 1, out_features]
+        # Normalize attention scores
+        attention = F.softmax(attention, dim=2)
+        attention = self.dropout_layer(attention)
         
-        return h_prime 
+        # Apply attention to node features
+        out = torch.matmul(attention.transpose(2, 3), Wh)  # [batch_size, num_nodes, num_heads, head_dim]
+        out = out.contiguous().view(batch_size, num_nodes, -1)  # [batch_size, num_nodes, graph_hidden_size]
+        
+        return out
+
+class TwoHopGraphLearning(nn.Module):
+    def __init__(self, config):
+        """Initialize two-hop graph learning module
+        
+        Args:
+            config: Model configuration
+        """
+        super().__init__()
+        
+        # User graph attention
+        self.user_gat = GraphAttentionLayer(config)
+        
+        # News graph attention
+        self.news_gat = GraphAttentionLayer(config)
+        
+        # Attention for aggregating neighbor information
+        self.user_attention = nn.Sequential(
+            nn.Linear(config.graph_hidden_size, config.attention_dim),
+            nn.Tanh(),
+            nn.Linear(config.attention_dim, 1)
+        )
+        
+        self.news_attention = nn.Sequential(
+            nn.Linear(config.graph_hidden_size, config.attention_dim),
+            nn.Tanh(),
+            nn.Linear(config.attention_dim, 1)
+        )
+        
+    def forward(self, user_features, news_features, user_adj=None, news_adj=None):
+        """Forward pass
+        
+        Args:
+            user_features: User node features [batch_size, num_users, hidden_size]
+            news_features: News node features [batch_size, num_news, hidden_size]
+            user_adj: User adjacency matrix [batch_size, num_users, num_users]
+            news_adj: News adjacency matrix [batch_size, num_news, num_news]
+            
+        Returns:
+            user_repr: Updated user representations
+            news_repr: Updated news representations
+        """
+        # Two-hop graph learning for users
+        user_neighbor_repr = self.user_gat(user_features, user_adj)
+        user_attention_weights = F.softmax(self.user_attention(user_neighbor_repr), dim=1)
+        user_repr = torch.sum(user_attention_weights * user_neighbor_repr, dim=1)
+        
+        # Two-hop graph learning for news
+        news_neighbor_repr = self.news_gat(news_features, news_adj)
+        news_attention_weights = F.softmax(self.news_attention(news_neighbor_repr), dim=1)
+        news_repr = torch.sum(news_attention_weights * news_neighbor_repr, dim=1)
+        
+        return user_repr, news_repr 

@@ -1,66 +1,65 @@
 import numpy as np
 from sklearn.metrics import roc_auc_score
 
-def calculate_mrr(y_true, y_score):
-    """
-    평균 역순위(Mean Reciprocal Rank) 계산
-    y_true: 실제 레이블 (첫 번째가 양성)
-    y_score: 예측 점수
-    """
-    rankings = (-y_score).argsort()
-    # 양성 샘플(첫 번째 아이템)의 순위 찾기
-    rank = np.where(rankings == 0)[0][0] + 1
-    return 1.0 / rank
-
-def calculate_ndcg(y_true, y_score, k):
-    """
-    정규화된 누적 이득(Normalized Discounted Cumulative Gain) 계산
-    """
-    rankings = (-y_score).argsort()
-    dcg_k = 0
-    idcg_k = 0
+def compute_metrics(scores, labels):
+    """Compute AUC, MRR, nDCG@5, nDCG@10
     
-    # DCG@K 계산
-    for i in range(min(k, len(rankings))):
-        if rankings[i] == 0:  # 양성 샘플이 상위 k개 안에 있는 경우
-            dcg_k += 1.0 / np.log2(i + 2)
-    
-    # IDCG@K 계산 (이상적인 경우 양성 샘플이 첫 번째)
-    idcg_k = 1.0  # 1 / log2(1 + 1)
-    
-    if idcg_k == 0:
-        return 0
-    
-    return dcg_k / idcg_k
-
-def calculate_metrics(y_true, y_score):
-    """
-    모든 평가 메트릭 계산
+    Args:
+        scores: Predicted scores [num_samples, num_candidates]
+        labels: Ground truth labels [num_samples, num_candidates]
+        
+    Returns:
+        dict: Dictionary containing metric values
     """
     metrics = {}
     
-    # AUC 계산
-    metrics['auc'] = roc_auc_score(y_true, y_score)
+    # AUC
+    auc_scores = []
+    for score, label in zip(scores, labels):
+        if len(np.unique(label)) > 1:  # Skip cases with all 0s or all 1s
+            auc_scores.append(roc_auc_score(label, score))
+    metrics['auc'] = np.mean(auc_scores)
     
-    # 각 샘플에 대해 MRR과 NDCG 계산
+    # MRR
     mrr_scores = []
-    ndcg5_scores = []
-    ndcg10_scores = []
-    
-    for i in range(len(y_true)):
-        if isinstance(y_true[i], list):
-            sample_true = y_true[i]
-            sample_score = y_score[i]
-        else:
-            sample_true = y_true
-            sample_score = y_score
-        
-        mrr_scores.append(calculate_mrr(sample_true, sample_score))
-        ndcg5_scores.append(calculate_ndcg(sample_true, sample_score, 5))
-        ndcg10_scores.append(calculate_ndcg(sample_true, sample_score, 10))
-    
+    for score, label in zip(scores, labels):
+        rank = np.where(np.argsort(-score) == np.where(label == 1)[0][0])[0][0] + 1
+        mrr_scores.append(1.0 / rank)
     metrics['mrr'] = np.mean(mrr_scores)
-    metrics['ndcg5'] = np.mean(ndcg5_scores)
-    metrics['ndcg10'] = np.mean(ndcg10_scores)
     
-    return metrics 
+    # nDCG@5
+    ndcg_scores_5 = []
+    for score, label in zip(scores, labels):
+        idcg_5 = dcg_at_k(label, 5)
+        if idcg_5 == 0:
+            continue
+        dcg_5 = dcg_at_k(label[np.argsort(-score)], 5)
+        ndcg_scores_5.append(dcg_5 / idcg_5)
+    metrics['ndcg@5'] = np.mean(ndcg_scores_5)
+    
+    # nDCG@10
+    ndcg_scores_10 = []
+    for score, label in zip(scores, labels):
+        idcg_10 = dcg_at_k(label, 10)
+        if idcg_10 == 0:
+            continue
+        dcg_10 = dcg_at_k(label[np.argsort(-score)], 10)
+        ndcg_scores_10.append(dcg_10 / idcg_10)
+    metrics['ndcg@10'] = np.mean(ndcg_scores_10)
+    
+    return metrics
+
+def dcg_at_k(r, k):
+    """Discounted Cumulative Gain at k
+    
+    Args:
+        r: Relevance scores
+        k: Number of items to consider
+        
+    Returns:
+        float: DCG value
+    """
+    r = np.array(r)[:k]
+    if r.size:
+        return np.sum(r / np.log2(np.arange(2, r.size + 2)))
+    return 0.0 
